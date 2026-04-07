@@ -12,14 +12,16 @@ import (
 type EventKind string
 
 const (
-	EventAssistantText    EventKind = "assistant_text"
-	EventToolCall         EventKind = "tool_call"
-	EventToolResult       EventKind = "tool_result"
-	EventAgentSpawned     EventKind = "agent_spawned"
-	EventAgentCompleted   EventKind = "agent_completed"
-	EventAgentCancelled   EventKind = "agent_cancelled"
-	EventSessionCompacted EventKind = "session_compacted"
-	EventHookError        EventKind = "hook_error"
+	EventAssistantText      EventKind = "assistant_text"
+	EventAssistantTextDelta EventKind = "assistant_text_delta"
+	EventAssistantTextDone  EventKind = "assistant_text_done"
+	EventToolCall           EventKind = "tool_call"
+	EventToolResult         EventKind = "tool_result"
+	EventAgentSpawned       EventKind = "agent_spawned"
+	EventAgentCompleted     EventKind = "agent_completed"
+	EventAgentCancelled     EventKind = "agent_cancelled"
+	EventSessionCompacted   EventKind = "session_compacted"
+	EventHookError          EventKind = "hook_error"
 )
 
 type Event struct {
@@ -36,6 +38,7 @@ type RunnerConfig struct {
 	MaxTokens           int
 	MaxTurns            int
 	Temperature         float64
+	StreamResponses     bool
 	ContextBudget       int
 	CompactKeepMessages int
 	WorkingDir          string
@@ -144,7 +147,7 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 
 		r.compactSessionIfNeeded(exec)
 
-		response, err := r.provider.CreateMessage(ctx, CompletionRequest{
+		response, streamedOutput, err := r.createMessage(ctx, exec, CompletionRequest{
 			Model:       r.config.Model,
 			System:      r.config.SystemPrompt,
 			MaxTokens:   r.config.MaxTokens,
@@ -164,12 +167,14 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 		assistantText := response.Message.Text()
 		if assistantText != "" {
 			finalText = assistantText
-			r.emit(Event{
-				Kind:      EventAssistantText,
-				AgentID:   exec.AgentID,
-				AgentName: exec.AgentName,
-				Text:      assistantText,
-			})
+			if !streamedOutput {
+				r.emit(Event{
+					Kind:      EventAssistantText,
+					AgentID:   exec.AgentID,
+					AgentName: exec.AgentName,
+					Text:      assistantText,
+				})
+			}
 		}
 
 		toolUses := collectToolUses(response.Message)
@@ -289,6 +294,44 @@ func (r *Runner) emit(event Event) {
 	case EventAgentSpawned, EventAgentCompleted, EventAgentCancelled:
 		r.agentEventHook(event)
 	}
+}
+
+func (r *Runner) createMessage(ctx context.Context, exec *ExecutionContext, request CompletionRequest) (CompletionResponse, bool, error) {
+	if !r.config.StreamResponses || exec.AgentID != "" {
+		response, err := r.provider.CreateMessage(ctx, request)
+		return response, false, err
+	}
+
+	streamingProvider, ok := r.provider.(StreamingProvider)
+	if !ok {
+		response, err := r.provider.CreateMessage(ctx, request)
+		return response, false, err
+	}
+
+	streamedOutput := false
+	response, err := streamingProvider.CreateMessageStream(ctx, request, func(event StreamEvent) {
+		switch event.Kind {
+		case StreamEventTextDelta:
+			if event.Text == "" {
+				return
+			}
+			streamedOutput = true
+			r.emit(Event{
+				Kind:      EventAssistantTextDelta,
+				AgentID:   exec.AgentID,
+				AgentName: exec.AgentName,
+				Text:      event.Text,
+			})
+		}
+	})
+	if streamedOutput {
+		r.emit(Event{
+			Kind:      EventAssistantTextDone,
+			AgentID:   exec.AgentID,
+			AgentName: exec.AgentName,
+		})
+	}
+	return response, streamedOutput, err
 }
 
 func collectToolUses(message Message) []Block {

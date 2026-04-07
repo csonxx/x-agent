@@ -15,18 +15,23 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
+	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 	"github.com/caowenhua/x-agent/xxx-code/internal/provider/anthropic"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
 type App struct {
-	config  config.Config
-	runner  *engine.Runner
-	session *engine.Session
-	out     io.Writer
-	errOut  io.Writer
-	saveMu  sync.Mutex
+	config     config.Config
+	registry   *engine.Registry
+	runner     *engine.Runner
+	session    *engine.Session
+	mcpManager *mcpruntime.Manager
+	out        io.Writer
+	errOut     io.Writer
+	saveMu     sync.Mutex
+	streamMu   sync.Mutex
+	streaming  bool
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
@@ -51,6 +56,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		&tools.AgentWaitTool{},
 		&tools.AgentListTool{},
 	)
+	app.registry = registry
 
 	provider := anthropic.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Version)
 	app.runner = engine.NewRunner(provider, registry, engine.RunnerConfig{
@@ -58,6 +64,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		SystemPrompt:        cfg.SystemPrompt,
 		MaxTokens:           cfg.MaxTokens,
 		MaxTurns:            cfg.MaxTurns,
+		StreamResponses:     cfg.Stream,
 		ContextBudget:       cfg.ContextBudget,
 		CompactKeepMessages: cfg.CompactKeep,
 		WorkingDir:          cfg.WorkingDir,
@@ -83,7 +90,20 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 	return app
 }
 
-func (a *App) Run(ctx context.Context) error {
+func (a *App) Run(ctx context.Context) (runErr error) {
+	if err := a.initMCP(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		if err := a.closeMCP(); err != nil {
+			if runErr == nil {
+				runErr = err
+				return
+			}
+			fmt.Fprintf(a.errOut, "mcp shutdown error: %v\n", err)
+		}
+	}()
+
 	if a.config.Resume {
 		if err := a.resume(); err != nil {
 			return err
@@ -152,6 +172,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":help                     show this help")
 		fmt.Fprintln(a.out, ":quit                     save and exit the REPL")
 		fmt.Fprintln(a.out, ":agents                   list spawned agents")
+		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
 		fmt.Fprintln(a.out, ":wait <agent-id>          wait for an agent and print its snapshot")
 		fmt.Fprintln(a.out, ":wait-all [agent-id ...]  wait for a batch of agents or every known agent")
 		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing agent")
@@ -166,6 +187,14 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 	case ":agents":
 		snapshots := a.runner.ListAgents()
 		data, _ := json.MarshalIndent(snapshots, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp":
+		statuses := []mcpruntime.ServerStatus{}
+		if a.mcpManager != nil {
+			statuses = a.mcpManager.Statuses()
+		}
+		data, _ := json.MarshalIndent(statuses, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
 	case ":wait":
@@ -284,6 +313,13 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintf(a.out, "context budget: %d\n", a.config.ContextBudget)
 		fmt.Fprintf(a.out, "max parallel agents: %d\n", a.config.MaxParallelAgents)
 		fmt.Fprintf(a.out, "agents: %d\n", len(a.runner.ListAgents()))
+		if a.mcpManager != nil {
+			fmt.Fprintf(a.out, "mcp config: %s\n", a.mcpManager.ConfigPath())
+			fmt.Fprintf(a.out, "mcp servers: %d\n", a.mcpManager.ServerCount())
+			fmt.Fprintf(a.out, "mcp tools: %d\n", a.mcpManager.ToolCount())
+		} else {
+			fmt.Fprintln(a.out, "mcp config: not loaded")
+		}
 		return false, nil
 	default:
 		fmt.Fprintf(a.errOut, "unknown command: %s\n", fields[0])
@@ -309,8 +345,44 @@ func (a *App) saveSession() error {
 	return persist.Save(a.config.SessionFile, a.session, a.runner)
 }
 
+func (a *App) initMCP(ctx context.Context) error {
+	manager, err := mcpruntime.Start(ctx, a.registry, mcpruntime.Options{
+		WorkingDir: a.config.WorkingDir,
+		ConfigFile: a.config.MCPConfigFile,
+	})
+	if err != nil {
+		return err
+	}
+	a.mcpManager = manager
+	if a.mcpManager == nil {
+		return nil
+	}
+
+	for _, status := range a.mcpManager.Statuses() {
+		switch status.Status {
+		case mcpruntime.ServerStatusConnected:
+			if a.config.Verbose {
+				fmt.Fprintf(a.errOut, "mcp server %s connected (%d tools)\n", status.Name, len(status.ToolNames))
+			}
+		case mcpruntime.ServerStatusFailed:
+			fmt.Fprintf(a.errOut, "mcp server %s failed: %s\n", status.Name, status.Error)
+		}
+		for _, warning := range status.Warnings {
+			fmt.Fprintf(a.errOut, "mcp server %s warning: %s\n", status.Name, warning)
+		}
+	}
+	return nil
+}
+
+func (a *App) closeMCP() error {
+	if a.mcpManager == nil {
+		return nil
+	}
+	return a.mcpManager.Close()
+}
+
 func (a *App) handleEvent(event engine.Event) {
-	printEvent(a.config.Verbose, a.out, a.errOut, event)
+	a.printEvent(event)
 	switch event.Kind {
 	case engine.EventAgentSpawned, engine.EventAgentCompleted, engine.EventAgentCancelled:
 		if err := a.saveSession(); err != nil {
@@ -319,48 +391,66 @@ func (a *App) handleEvent(event engine.Event) {
 	}
 }
 
-func printEvent(verbose bool, out, errOut io.Writer, event engine.Event) {
+func (a *App) printEvent(event engine.Event) {
+	a.streamMu.Lock()
+	defer a.streamMu.Unlock()
+
 	switch event.Kind {
+	case engine.EventAssistantTextDelta:
+		if event.Text == "" {
+			return
+		}
+		fmt.Fprint(a.out, event.Text)
+		a.streaming = !strings.HasSuffix(event.Text, "\n")
+	case engine.EventAssistantTextDone:
+		if a.streaming {
+			fmt.Fprintln(a.out)
+			a.streaming = false
+		}
 	case engine.EventAssistantText:
+		if a.streaming {
+			fmt.Fprintln(a.out)
+			a.streaming = false
+		}
 		if strings.TrimSpace(event.Text) == "" {
 			return
 		}
 		if event.AgentName != "" {
-			fmt.Fprintf(out, "[%s] %s\n", event.AgentName, event.Text)
+			fmt.Fprintf(a.out, "[%s] %s\n", event.AgentName, event.Text)
 			return
 		}
-		fmt.Fprintln(out, event.Text)
+		fmt.Fprintln(a.out, event.Text)
 	case engine.EventToolCall:
-		if verbose {
+		if a.config.Verbose {
 			agentPrefix := ""
 			if event.AgentName != "" {
 				agentPrefix = "[" + event.AgentName + "] "
 			}
-			fmt.Fprintf(errOut, "%stool %s %s\n", agentPrefix, event.ToolName, event.Text)
+			fmt.Fprintf(a.errOut, "%stool %s %s\n", agentPrefix, event.ToolName, event.Text)
 		}
 	case engine.EventToolResult:
-		if verbose {
+		if a.config.Verbose {
 			agentPrefix := ""
 			if event.AgentName != "" {
 				agentPrefix = "[" + event.AgentName + "] "
 			}
-			fmt.Fprintf(errOut, "%stool-result %s %s\n", agentPrefix, event.ToolName, event.Text)
+			fmt.Fprintf(a.errOut, "%stool-result %s %s\n", agentPrefix, event.ToolName, event.Text)
 		}
 	case engine.EventAgentSpawned:
-		fmt.Fprintf(errOut, "spawned agent %s (%s)\n", event.AgentName, event.AgentID)
+		fmt.Fprintf(a.errOut, "spawned agent %s (%s)\n", event.AgentName, event.AgentID)
 	case engine.EventAgentCompleted:
-		fmt.Fprintf(errOut, "agent %s completed\n", event.AgentName)
+		fmt.Fprintf(a.errOut, "agent %s completed\n", event.AgentName)
 	case engine.EventAgentCancelled:
-		fmt.Fprintf(errOut, "agent %s cancelled\n", event.AgentName)
+		fmt.Fprintf(a.errOut, "agent %s cancelled\n", event.AgentName)
 	case engine.EventSessionCompacted:
-		if verbose {
+		if a.config.Verbose {
 			agentPrefix := ""
 			if event.AgentName != "" {
 				agentPrefix = "[" + event.AgentName + "] "
 			}
-			fmt.Fprintf(errOut, "%ssession %s\n", agentPrefix, event.Text)
+			fmt.Fprintf(a.errOut, "%ssession %s\n", agentPrefix, event.Text)
 		}
 	case engine.EventHookError:
-		fmt.Fprintf(errOut, "hook error: %s\n", event.Text)
+		fmt.Fprintf(a.errOut, "hook error: %s\n", event.Text)
 	}
 }

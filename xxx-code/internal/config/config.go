@@ -17,6 +17,7 @@ Guidelines:
 - Read files before changing them when the task depends on existing code.
 - Prefer the smallest correct change over speculative refactors.
 - Use bash for shell tasks, read_file/write_file/edit_file for direct file work, glob/grep for search.
+- MCP tools may be available with names like mcp__server__tool; use them when they clearly fit the task.
 - Use agent_spawn only when a sub-task is clearly separable and benefits from parallel or isolated execution.
 - If you spawn a background agent, use agent_wait or agent_list to integrate its result before you finish.
 - Be explicit about verification. If you did not run a check, say so.
@@ -34,6 +35,7 @@ type Config struct {
 	CompactKeep       int
 	WorkingDir        string
 	SessionFile       string
+	MCPConfigFile     string
 	ReadRoots         []string
 	WriteRoots        []string
 	ReadOnly          bool
@@ -45,6 +47,7 @@ type Config struct {
 	HookTimeout       time.Duration
 	Resume            bool
 	Print             bool
+	Stream            bool
 	Verbose           bool
 	SystemPrompt      string
 	ToolTimeout       time.Duration
@@ -65,6 +68,7 @@ func Load() (Config, error) {
 	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")
 	flag.BoolVar(&cfg.BashEnabled, "bash", true, "Enable or disable the bash tool")
 	flag.BoolVar(&cfg.Print, "print", false, "Run once and exit")
+	flag.BoolVar(&cfg.Stream, "stream", true, "Stream assistant text as it is generated when the provider supports it")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Print tool and agent lifecycle events")
 	flag.BoolVar(&cfg.Resume, "resume", false, "Resume the main session and known agents from the session file")
 	flag.DurationVar(&cfg.ToolTimeout, "tool-timeout", 2*time.Minute, "Per-tool execution timeout")
@@ -73,6 +77,7 @@ func Load() (Config, error) {
 	systemPromptFile := flag.String("system-prompt-file", "", "Read the system prompt from a file")
 	cwdFlag := flag.String("cwd", "", "Working directory")
 	sessionFileFlag := flag.String("session-file", "", "Path to the persisted session file")
+	mcpConfigFlag := flag.String("mcp-config", strings.TrimSpace(os.Getenv("XXX_CODE_MCP_CONFIG")), "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
 	readRootsFlag := flag.String("allow-read", "", "Comma-separated read roots; the working directory is always included")
 	writeRootsFlag := flag.String("allow-write", "", "Comma-separated write roots; the working directory is always included unless --read-only is set")
 	hookBeforeToolFlag := flag.String("hook-before-tool", "", "Shell command to run before each tool call; non-zero exit blocks the tool")
@@ -108,6 +113,10 @@ func Load() (Config, error) {
 		cfg.SessionFile = filepath.Join(cfg.WorkingDir, ".xxx-code", "session.json")
 	}
 
+	if strings.TrimSpace(*mcpConfigFlag) != "" {
+		cfg.MCPConfigFile = resolvePath(cfg.WorkingDir, *mcpConfigFlag)
+	}
+
 	cfg.ReadRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *readRootsFlag)...)
 	cfg.WriteRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *writeRootsFlag)...)
 	cfg.HookBeforeTool = strings.TrimSpace(*hookBeforeToolFlag)
@@ -141,19 +150,26 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func resolvePath(base, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw)
+	}
+	return filepath.Join(base, raw)
+}
+
 func parseRoots(base, raw string) []string {
 	parts := strings.Split(raw, ",")
 	roots := make([]string, 0, len(parts))
 	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
+		path := resolvePath(base, part)
+		if path == "" {
 			continue
 		}
-		if filepath.IsAbs(part) {
-			roots = append(roots, filepath.Clean(part))
-			continue
-		}
-		roots = append(roots, filepath.Join(base, part))
+		roots = append(roots, path)
 	}
 	return roots
 }

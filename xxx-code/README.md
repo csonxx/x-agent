@@ -10,6 +10,8 @@
 - 文件/命令权限策略
 - lifecycle hooks 扩展点
 - 本地工具调用
+- 本地 stdio MCP 客户端与动态工具桥接
+- 主会话流式文本输出
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
@@ -24,6 +26,7 @@ xxx-code/
   internal/cli/              REPL、事件输出、自动保存
   internal/config/           配置与参数
   internal/engine/           核心运行时、消息模型、主循环、agent 管理
+  internal/mcp/              MCP 配置加载、stdio client、动态 tool bridge
   internal/persist/          session 与 agent 状态持久化
   internal/provider/         模型提供方适配
   internal/tools/            内建工具
@@ -43,6 +46,7 @@ xxx-code/
 - `agent_cancel`
 - `agent_wait`
 - `agent_list`
+- `mcp__<server>__<tool>` 动态 MCP tools
 
 ## 运行前准备
 
@@ -63,6 +67,7 @@ REPL 内支持：
 
 - `:help`
 - `:agents`
+- `:mcp`
 - `:wait <agent-id>`
 - `:wait-all [agent-id ...]`
 - `:send <agent-id> <prompt>`
@@ -79,6 +84,12 @@ REPL 内支持：
 
 ```bash
 go run ./cmd/xxx-code --print "分析当前目录的 Go 项目结构并给出修改建议"
+```
+
+如果你想关闭主会话的增量输出，也可以显式关掉：
+
+```bash
+go run ./cmd/xxx-code --stream=false
 ```
 
 ## Session 持久化与恢复
@@ -190,6 +201,34 @@ go run ./cmd/xxx-code \
 
 REPL 里可以用 `:hooks` 查看当前配置。
 
+## MCP
+
+`xxx-code` 现在会自动读取工作目录下的 `.mcp.json`，并把其中 `mcpServers` 里配置的本地 stdio server 动态注册成工具。
+
+兼容的配置形态：
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    }
+  }
+}
+```
+
+启动时会把这些远端工具映射成 `mcp__playwright__<tool>` 这种名字，所以它们会和内建 tools 一起出现在同一个 tool 集合里。
+
+也可以显式指定配置文件：
+
+```bash
+go run ./cmd/xxx-code \
+  --mcp-config /path/to/.mcp.json
+```
+
+REPL 里可以用 `:mcp` 查看每个 server 的连接状态、已注册工具和 warning。当前这版先支持本地 `stdio` transport；`http / sse / ws` 还没补。
+
 ## Agent 调度
 
 `xxx-code` 现在支持子 agent 并发上限控制。超过上限的新 agent 不会直接并发运行，而是进入 `queued` 状态，等已有 agent 释放槽位后再继续执行。
@@ -241,7 +280,9 @@ go run ./cmd/xxx-code \
   --hook-timeout 30s \
   --context-budget 120000 \
   --compact-keep 12 \
+  --stream=false \
   --cwd /path/to/project \
+  --mcp-config /path/to/project/.mcp.json \
   --allow-read ../shared-docs \
   --allow-write ./generated \
   --resume \
@@ -282,9 +323,13 @@ go run ./cmd/xxx-code \
 
 除了 session 持久化，runtime 自己也会做 context budget 管理。这样 agent 和子 agent 都能在更长时间尺度上持续工作，而不会因为 transcript 线性膨胀就很快失控。
 
-### 5. 依赖尽量轻
+### 5. MCP 也走统一 Tool 抽象
 
-当前实现只使用 Go 标准库，方便你后续继续扩展、嵌入、裁剪。
+MCP server 并不是旁路插件系统，而是启动时桥接进同一个 registry。对模型来说，它看到的只是额外多了一批 `mcp__server__tool`，所以主循环、hooks、multi-agent 协作都不需要分叉实现。
+
+### 6. 依赖仍然尽量轻
+
+除 Anthropic HTTP 适配外，新增的 MCP 能力也只引入了官方 Go SDK，没有把 runtime 绑到更重的框架里，后面继续做嵌入式 multi-agent runtime 还比较顺手。
 
 ## 测试
 
@@ -296,9 +341,9 @@ go test ./...
 
 这一版仍然刻意没有覆盖 TypeScript 版里特别重的产品层：
 
-- 流式 UI / 增量 token 输出
-- MCP 客户端
+- 更完整的流式 TUI / 富交互界面
 - 更细粒度的权限系统
+- 远程 MCP transport（HTTP / SSE / WS）
 - remote agent / bridge / daemon
 - 更完整的任务调度、优先级与取消传播
 

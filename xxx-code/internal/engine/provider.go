@@ -21,3 +21,18 @@ type CompletionResponse struct {
 type Provider interface {
 	CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error)
 }
+
+type StreamEventKind string
+
+const (
+	StreamEventTextDelta StreamEventKind = "text_delta"
+)
+
+type StreamEvent struct {
+	Kind StreamEventKind
+	Text string
+}
+
+type StreamingProvider interface {
+	CreateMessageStream(ctx context.Context, request CompletionRequest, handle func(StreamEvent)) (CompletionResponse, error)
+}

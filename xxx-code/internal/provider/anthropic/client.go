@@ -44,6 +44,7 @@ type requestPayload struct {
 	System      string           `json:"system,omitempty"`
 	MaxTokens   int              `json:"max_tokens"`
 	Temperature float64          `json:"temperature,omitempty"`
+	Stream      bool             `json:"stream,omitempty"`
 	Messages    []messagePayload `json:"messages"`
 	Tools       []toolPayload    `json:"tools,omitempty"`
 }
@@ -97,7 +98,7 @@ type responseError struct {
 	Message string `json:"message"`
 }
 
-func (c *Client) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+func buildRequestPayload(request engine.CompletionRequest) requestPayload {
 	payload := requestPayload{
 		Model:       request.Model,
 		System:      request.System,
@@ -140,19 +141,30 @@ func (c *Client) CreateMessage(ctx context.Context, request engine.CompletionReq
 			InputSchema: tool.InputSchema,
 		})
 	}
+	return payload
+}
 
+func (c *Client) newMessagesRequest(ctx context.Context, payload requestPayload) (*http.Request, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return engine.CompletionResponse{}, err
+		return nil, err
 	}
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return engine.CompletionResponse{}, err
+		return nil, err
 	}
 	httpRequest.Header.Set("content-type", "application/json")
 	httpRequest.Header.Set("x-api-key", c.apiKey)
 	httpRequest.Header.Set("anthropic-version", c.version)
+	return httpRequest, nil
+}
+
+func (c *Client) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	httpRequest, err := c.newMessagesRequest(ctx, buildRequestPayload(request))
+	if err != nil {
+		return engine.CompletionResponse{}, err
+	}
 
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
@@ -178,6 +190,10 @@ func (c *Client) CreateMessage(ctx context.Context, request engine.CompletionReq
 		return engine.CompletionResponse{}, err
 	}
 
+	return decodeResponsePayload(decoded), nil
+}
+
+func decodeResponsePayload(decoded responsePayload) engine.CompletionResponse {
 	content := make([]engine.Block, 0, len(decoded.Content))
 	for _, block := range decoded.Content {
 		switch block.Type {
@@ -207,5 +223,5 @@ func (c *Client) CreateMessage(ctx context.Context, request engine.CompletionReq
 			InputTokens:  decoded.Usage.InputTokens,
 			OutputTokens: decoded.Usage.OutputTokens,
 		},
-	}, nil
+	}
 }
