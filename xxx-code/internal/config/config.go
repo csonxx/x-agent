@@ -30,6 +30,8 @@ type Config struct {
 	MaxTurns     int
 	MaxTokens    int
 	WorkingDir   string
+	SessionFile  string
+	Resume       bool
 	Print        bool
 	Verbose      bool
 	SystemPrompt string
@@ -47,10 +49,12 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.MaxTokens, "max-tokens", 16384, "Max output tokens per model request")
 	flag.BoolVar(&cfg.Print, "print", false, "Run once and exit")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Print tool and agent lifecycle events")
+	flag.BoolVar(&cfg.Resume, "resume", false, "Resume the main session and known agents from the session file")
 	flag.DurationVar(&cfg.ToolTimeout, "tool-timeout", 2*time.Minute, "Per-tool execution timeout")
 
 	systemPromptFile := flag.String("system-prompt-file", "", "Read the system prompt from a file")
 	cwdFlag := flag.String("cwd", "", "Working directory")
+	sessionFileFlag := flag.String("session-file", "", "Path to the persisted session file")
 
 	flag.Parse()
 
@@ -69,6 +73,16 @@ func Load() (Config, error) {
 		cfg.WorkingDir = wd
 	}
 	cfg.WorkingDir = filepath.Clean(cfg.WorkingDir)
+
+	if *sessionFileFlag != "" {
+		if filepath.IsAbs(*sessionFileFlag) {
+			cfg.SessionFile = filepath.Clean(*sessionFileFlag)
+		} else {
+			cfg.SessionFile = filepath.Join(cfg.WorkingDir, *sessionFileFlag)
+		}
+	} else {
+		cfg.SessionFile = filepath.Join(cfg.WorkingDir, ".xxx-code", "session.json")
+	}
 
 	cfg.SystemPrompt = defaultSystemPrompt
 	if *systemPromptFile != "" {

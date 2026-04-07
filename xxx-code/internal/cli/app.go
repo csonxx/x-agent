@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 	"github.com/caowenhua/x-agent/xxx-code/internal/provider/anthropic"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
@@ -22,9 +25,17 @@ type App struct {
 	session *engine.Session
 	out     io.Writer
 	errOut  io.Writer
+	saveMu  sync.Mutex
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
+	app := &App{
+		config:  cfg,
+		session: engine.NewSession(),
+		out:     out,
+		errOut:  errOut,
+	}
+
 	registry := engine.NewRegistry(
 		&tools.BashTool{},
 		&tools.ReadFileTool{},
@@ -33,12 +44,13 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		&tools.GlobTool{},
 		&tools.GrepTool{},
 		&tools.AgentSpawnTool{},
+		&tools.AgentSendTool{},
 		&tools.AgentWaitTool{},
 		&tools.AgentListTool{},
 	)
 
 	provider := anthropic.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Version)
-	runner := engine.NewRunner(provider, registry, engine.RunnerConfig{
+	app.runner = engine.NewRunner(provider, registry, engine.RunnerConfig{
 		Model:         cfg.Model,
 		SystemPrompt:  cfg.SystemPrompt,
 		MaxTokens:     cfg.MaxTokens,
@@ -46,24 +58,24 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		WorkingDir:    cfg.WorkingDir,
 		ToolTimeout:   cfg.ToolTimeout,
 		MaxAgentDepth: 3,
-		EventHandler: func(event engine.Event) {
-			printEvent(cfg.Verbose, out, errOut, event)
-		},
+		EventHandler:  app.handleEvent,
 	})
 
-	return &App{
-		config:  cfg,
-		runner:  runner,
-		session: engine.NewSession(),
-		out:     out,
-		errOut:  errOut,
-	}
+	return app
 }
 
 func (a *App) Run(ctx context.Context) error {
+	if a.config.Resume {
+		if err := a.resume(); err != nil {
+			return err
+		}
+	}
+
 	if a.config.Print {
-		_, err := a.runner.RunTurn(ctx, a.session, a.config.Prompt)
-		return err
+		if _, err := a.runner.RunTurn(ctx, a.session, a.config.Prompt); err != nil {
+			return err
+		}
+		return a.saveSession()
 	}
 
 	return a.runREPL(ctx)
@@ -72,6 +84,9 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) runREPL(ctx context.Context) error {
 	fmt.Fprintf(a.out, "xxx-code (%s)\n", a.config.Model)
 	fmt.Fprintln(a.out, "Type :help for commands, :quit to exit.")
+	if a.config.Resume {
+		fmt.Fprintf(a.errOut, "resumed session from %s\n", a.config.SessionFile)
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -82,7 +97,7 @@ func (a *App) runREPL(ctx context.Context) error {
 			if err := scanner.Err(); err != nil {
 				return err
 			}
-			return nil
+			return a.saveSession()
 		}
 
 		line := strings.TrimSpace(scanner.Text())
@@ -101,6 +116,10 @@ func (a *App) runREPL(ctx context.Context) error {
 
 		if _, err := a.runner.RunTurn(ctx, a.session, line); err != nil {
 			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			continue
+		}
+		if err := a.saveSession(); err != nil {
+			fmt.Fprintf(a.errOut, "autosave error: %v\n", err)
 		}
 	}
 }
@@ -109,12 +128,16 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 	fields := strings.Fields(line)
 	switch fields[0] {
 	case ":quit", ":exit":
-		return true, nil
+		return true, a.saveSession()
 	case ":help":
-		fmt.Fprintln(a.out, ":help                show this help")
-		fmt.Fprintln(a.out, ":quit                exit the REPL")
-		fmt.Fprintln(a.out, ":agents              list spawned agents")
-		fmt.Fprintln(a.out, ":wait <agent-id>     wait for an agent and print its snapshot")
+		fmt.Fprintln(a.out, ":help                     show this help")
+		fmt.Fprintln(a.out, ":quit                     save and exit the REPL")
+		fmt.Fprintln(a.out, ":agents                   list spawned agents")
+		fmt.Fprintln(a.out, ":wait <agent-id>          wait for an agent and print its snapshot")
+		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing agent")
+		fmt.Fprintln(a.out, ":history [n]              print the latest n main-session messages (default 10)")
+		fmt.Fprintln(a.out, ":save                     persist the current main session and agents")
+		fmt.Fprintln(a.out, ":session                  print session file information")
 		return false, nil
 	case ":agents":
 		snapshots := a.runner.ListAgents()
@@ -136,9 +159,82 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		data, _ := json.MarshalIndent(snapshot, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
+	case ":send":
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) < 3 || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+			fmt.Fprintln(a.errOut, "usage: :send <agent-id> <prompt>")
+			return false, nil
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		snapshot, err := a.runner.SendAgent(sendCtx, strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]), false)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(snapshot, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":history":
+		limit := 10
+		if len(fields) > 1 {
+			n, err := strconv.Atoi(fields[1])
+			if err != nil || n <= 0 {
+				fmt.Fprintln(a.errOut, "usage: :history [positive-number]")
+				return false, nil
+			}
+			limit = n
+		}
+		messages := a.session.Snapshot()
+		if len(messages) > limit {
+			messages = messages[len(messages)-limit:]
+		}
+		data, _ := json.MarshalIndent(messages, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":save":
+		if err := a.saveSession(); err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		fmt.Fprintf(a.out, "saved session to %s\n", a.config.SessionFile)
+		return false, nil
+	case ":session":
+		fmt.Fprintf(a.out, "session file: %s\n", a.config.SessionFile)
+		fmt.Fprintf(a.out, "main messages: %d\n", len(a.session.Snapshot()))
+		fmt.Fprintf(a.out, "agents: %d\n", len(a.runner.ListAgents()))
+		return false, nil
 	default:
 		fmt.Fprintf(a.errOut, "unknown command: %s\n", fields[0])
 		return false, nil
+	}
+}
+
+func (a *App) resume() error {
+	state, err := persist.Load(a.config.SessionFile)
+	if err != nil {
+		return fmt.Errorf("resume session: %w", err)
+	}
+	a.session.Replace(state.Main)
+	if err := a.runner.ImportAgents(state.Agents); err != nil {
+		return fmt.Errorf("resume agents: %w", err)
+	}
+	return nil
+}
+
+func (a *App) saveSession() error {
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
+	return persist.Save(a.config.SessionFile, a.session, a.runner)
+}
+
+func (a *App) handleEvent(event engine.Event) {
+	printEvent(a.config.Verbose, a.out, a.errOut, event)
+	switch event.Kind {
+	case engine.EventAgentSpawned, engine.EventAgentCompleted:
+		if err := a.saveSession(); err != nil {
+			fmt.Fprintf(a.errOut, "autosave error: %v\n", err)
+		}
 	}
 }
 

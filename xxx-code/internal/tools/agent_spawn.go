@@ -24,7 +24,7 @@ type agentSpawnInput struct {
 func (t *AgentSpawnTool) Definition() engine.ToolDefinition {
 	return engine.ToolDefinition{
 		Name:        "agent_spawn",
-		Description: "Spawn a sub-agent. Use background=true to let it run asynchronously, then inspect it with agent_list or agent_wait.",
+		Description: "Spawn a sub-agent. Use background=true to let it run asynchronously, then inspect it with agent_list, agent_wait, or continue it with agent_send.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -63,6 +63,8 @@ func (t *AgentSpawnTool) Definition() engine.ToolDefinition {
 }
 
 func (t *AgentSpawnTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	_ = ctx
+
 	var args agentSpawnInput
 	if err := json.Unmarshal(input, &args); err != nil {
 		return engine.ToolResult{}, err
@@ -114,6 +116,70 @@ func (t *AgentSpawnTool) Call(ctx context.Context, execCtx *engine.ExecutionCont
 	}, nil
 }
 
+type AgentSendTool struct{}
+
+type agentSendInput struct {
+	AgentID    string `json:"agent_id"`
+	Prompt     string `json:"prompt"`
+	Background bool   `json:"background,omitempty"`
+}
+
+func (t *AgentSendTool) Definition() engine.ToolDefinition {
+	return engine.ToolDefinition{
+		Name:        "agent_send",
+		Description: "Continue a previously spawned sub-agent with a new prompt while preserving its private session history.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"agent_id": map[string]any{
+					"type":        "string",
+					"description": "The ID returned by agent_spawn.",
+				},
+				"prompt": map[string]any{
+					"type":        "string",
+					"description": "The next task for the existing sub-agent.",
+				},
+				"background": map[string]any{
+					"type":        "boolean",
+					"description": "Run asynchronously if true.",
+				},
+			},
+			"required": []string{"agent_id", "prompt"},
+		},
+	}
+}
+
+func (t *AgentSendTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	var args agentSendInput
+	if err := json.Unmarshal(input, &args); err != nil {
+		return engine.ToolResult{}, err
+	}
+
+	snapshot, err := execCtx.Runner.SendAgent(ctx, args.AgentID, args.Prompt, args.Background)
+	if err != nil {
+		return engine.ToolResult{}, err
+	}
+
+	if args.Background {
+		return engine.ToolResult{
+			Content: mustJSON(map[string]any{
+				"agent_id":   snapshot.ID,
+				"name":       snapshot.Name,
+				"status":     snapshot.Status,
+				"background": true,
+			}),
+		}, nil
+	}
+
+	if snapshot.Status == engine.AgentFailed {
+		return engine.ToolResult{
+			Content: mustJSON(snapshot),
+			IsError: true,
+		}, nil
+	}
+	return engine.ToolResult{Content: mustJSON(snapshot)}, nil
+}
+
 type AgentWaitTool struct{}
 
 type agentWaitInput struct {
@@ -124,7 +190,7 @@ type agentWaitInput struct {
 func (t *AgentWaitTool) Definition() engine.ToolDefinition {
 	return engine.ToolDefinition{
 		Name:        "agent_wait",
-		Description: "Wait for a background sub-agent to finish and return its result.",
+		Description: "Wait for a sub-agent's current task to finish and return its latest snapshot.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -45,8 +44,7 @@ type Runner struct {
 	registry *Registry
 	config   RunnerConfig
 
-	agentsMu sync.RWMutex
-	agents   map[string]*managedAgent
+	agentState *agentState
 }
 
 type RunResult struct {
@@ -72,7 +70,9 @@ func NewRunner(provider Provider, registry *Registry, config RunnerConfig) *Runn
 		provider: provider,
 		registry: registry,
 		config:   config,
-		agents:   make(map[string]*managedAgent),
+		agentState: &agentState{
+			agents: make(map[string]*managedAgent),
+		},
 	}
 }
 
