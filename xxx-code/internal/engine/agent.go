@@ -14,14 +14,17 @@ import (
 type AgentStatus string
 
 const (
-	AgentRunning AgentStatus = "running"
-	AgentIdle    AgentStatus = "idle"
-	AgentFailed  AgentStatus = "failed"
+	AgentRunning   AgentStatus = "running"
+	AgentIdle      AgentStatus = "idle"
+	AgentFailed    AgentStatus = "failed"
+	AgentCancelled AgentStatus = "cancelled"
 )
 
 type AgentSnapshot struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
+	ParentID    string      `json:"parent_id,omitempty"`
+	Children    []string    `json:"children,omitempty"`
 	Status      AgentStatus `json:"status"`
 	Prompt      string      `json:"prompt"`
 	Result      string      `json:"result,omitempty"`
@@ -61,6 +64,8 @@ type managedAgent struct {
 	runner   *Runner
 	depth    int
 	done     chan struct{}
+	cancel   context.CancelFunc
+	runSeq   uint64
 }
 
 func newAgentID() (string, error) {
@@ -93,8 +98,10 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 	}
 
 	depth := 0
+	parentID := ""
 	if parent != nil {
 		depth = parent.Depth + 1
+		parentID = parent.AgentID
 	}
 
 	childRunner := r.cloneForAgent(request)
@@ -107,6 +114,7 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 		snapshot: AgentSnapshot{
 			ID:         id,
 			Name:       name,
+			ParentID:   parentID,
 			Status:     AgentRunning,
 			Prompt:     request.Prompt,
 			Background: request.Background,
@@ -116,10 +124,19 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 		runner:  childRunner,
 		depth:   depth,
 		done:    make(chan struct{}),
+		runSeq:  1,
 	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	agent.cancel = cancel
 
 	r.agentState.mu.Lock()
 	r.agentState.agents[id] = agent
+	if parentID != "" {
+		if parentAgent, ok := r.agentState.agents[parentID]; ok {
+			parentAgent.snapshot.Children = appendUnique(parentAgent.snapshot.Children, id)
+		}
+	}
 	r.agentState.mu.Unlock()
 
 	r.emit(Event{
@@ -129,8 +146,8 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 		Text:      request.Prompt,
 	})
 
-	snapshot := agent.snapshot
-	r.runManagedAgent(agent, request.Prompt, agent.done)
+	snapshot := cloneAgentSnapshot(agent.snapshot)
+	r.runManagedAgent(agent, request.Prompt, agent.done, runCtx, agent.runSeq)
 
 	if request.Background {
 		return snapshot, nil
@@ -158,6 +175,7 @@ func (r *Runner) SendAgent(ctx context.Context, id, prompt string, background bo
 		return AgentSnapshot{}, errors.New("agent is already running")
 	}
 
+	agent.runSeq++
 	agent.snapshot.Status = AgentRunning
 	agent.snapshot.Prompt = prompt
 	agent.snapshot.Result = ""
@@ -166,16 +184,71 @@ func (r *Runner) SendAgent(ctx context.Context, id, prompt string, background bo
 	agent.snapshot.CompletedAt = nil
 	agent.done = make(chan struct{})
 
-	snapshot := agent.snapshot
+	runCtx, cancel := context.WithCancel(context.Background())
+	agent.cancel = cancel
+
+	snapshot := cloneAgentSnapshot(agent.snapshot)
 	done := agent.done
+	runSeq := agent.runSeq
 	r.agentState.mu.Unlock()
 
-	r.runManagedAgent(agent, prompt, done)
+	r.runManagedAgent(agent, prompt, done, runCtx, runSeq)
 
 	if background {
 		return snapshot, nil
 	}
 	return r.WaitAgent(ctx, id)
+}
+
+func (r *Runner) CancelAgent(ctx context.Context, id string, recursive bool) (AgentSnapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	targets, err := r.cancelTargets(id, recursive)
+	if err != nil {
+		return AgentSnapshot{}, err
+	}
+
+	type pendingCancel struct {
+		id      string
+		running bool
+		cancel  context.CancelFunc
+	}
+
+	cancellations := make([]pendingCancel, 0, len(targets))
+	r.agentState.mu.RLock()
+	for _, targetID := range targets {
+		agent, ok := r.agentState.agents[targetID]
+		if !ok {
+			r.agentState.mu.RUnlock()
+			return AgentSnapshot{}, errors.New("agent not found")
+		}
+		cancellations = append(cancellations, pendingCancel{
+			id:      targetID,
+			running: agent.snapshot.Status == AgentRunning,
+			cancel:  agent.cancel,
+		})
+	}
+	r.agentState.mu.RUnlock()
+
+	for _, item := range cancellations {
+		if item.running && item.cancel != nil {
+			item.cancel()
+		}
+	}
+
+	var snapshot AgentSnapshot
+	for _, targetID := range targets {
+		current, err := r.WaitAgent(ctx, targetID)
+		if err != nil {
+			return AgentSnapshot{}, err
+		}
+		if targetID == id {
+			snapshot = current
+		}
+	}
+	return snapshot, nil
 }
 
 func (r *Runner) WaitAgent(ctx context.Context, id string) (AgentSnapshot, error) {
@@ -189,7 +262,7 @@ func (r *Runner) WaitAgent(ctx context.Context, id string) (AgentSnapshot, error
 		r.agentState.mu.RUnlock()
 		return AgentSnapshot{}, errors.New("agent not found")
 	}
-	snapshot := agent.snapshot
+	snapshot := cloneAgentSnapshot(agent.snapshot)
 	done := agent.done
 	r.agentState.mu.RUnlock()
 
@@ -203,7 +276,7 @@ func (r *Runner) WaitAgent(ctx context.Context, id string) (AgentSnapshot, error
 	case <-done:
 		r.agentState.mu.RLock()
 		defer r.agentState.mu.RUnlock()
-		return r.agentState.agents[id].snapshot, nil
+		return cloneAgentSnapshot(r.agentState.agents[id].snapshot), nil
 	}
 }
 
@@ -213,7 +286,7 @@ func (r *Runner) ListAgents() []AgentSnapshot {
 
 	snapshots := make([]AgentSnapshot, 0, len(r.agentState.agents))
 	for _, agent := range r.agentState.agents {
-		snapshots = append(snapshots, agent.snapshot)
+		snapshots = append(snapshots, cloneAgentSnapshot(agent.snapshot))
 	}
 	sort.Slice(snapshots, func(i, j int) bool {
 		return snapshots[i].StartedAt.Before(snapshots[j].StartedAt)
@@ -228,7 +301,7 @@ func (r *Runner) ExportAgents() []PersistedAgentState {
 	states := make([]PersistedAgentState, 0, len(r.agentState.agents))
 	for _, agent := range r.agentState.agents {
 		states = append(states, PersistedAgentState{
-			Snapshot:   agent.snapshot,
+			Snapshot:   cloneAgentSnapshot(agent.snapshot),
 			Session:    agent.session.Snapshot(),
 			Depth:      agent.depth,
 			Model:      agent.runner.config.Model,
@@ -254,7 +327,7 @@ func (r *Runner) ImportAgents(states []PersistedAgentState) error {
 			return errors.New("duplicate agent id: " + state.Snapshot.ID)
 		}
 
-		snapshot := state.Snapshot
+		snapshot := cloneAgentSnapshot(state.Snapshot)
 		if snapshot.Status == "" {
 			snapshot.Status = AgentIdle
 		}
@@ -285,11 +358,11 @@ func (r *Runner) ImportAgents(states []PersistedAgentState) error {
 	return nil
 }
 
-func (r *Runner) runManagedAgent(agent *managedAgent, prompt string, done chan struct{}) {
+func (r *Runner) runManagedAgent(agent *managedAgent, prompt string, done chan struct{}, runCtx context.Context, runSeq uint64) {
 	go func() {
 		defer close(done)
 
-		result, runErr := agent.runner.runTurn(context.Background(), &ExecutionContext{
+		result, runErr := agent.runner.runTurn(runCtx, &ExecutionContext{
 			Runner:     agent.runner,
 			Session:    agent.session,
 			WorkingDir: agent.runner.config.WorkingDir,
@@ -301,30 +374,101 @@ func (r *Runner) runManagedAgent(agent *managedAgent, prompt string, done chan s
 		finished := time.Now()
 
 		r.agentState.mu.Lock()
-		if runErr != nil {
+		if agent.runSeq != runSeq {
+			r.agentState.mu.Unlock()
+			return
+		}
+
+		switch {
+		case errors.Is(runErr, context.Canceled):
+			agent.snapshot.Status = AgentCancelled
+			agent.snapshot.Error = "agent run cancelled"
+			agent.snapshot.Result = ""
+		case runErr != nil:
 			agent.snapshot.Status = AgentFailed
 			agent.snapshot.Error = runErr.Error()
 			agent.snapshot.Result = ""
-		} else {
+		default:
 			agent.snapshot.Status = AgentIdle
 			agent.snapshot.Error = ""
 			agent.snapshot.Result = result.FinalText
 		}
+
 		agent.snapshot.CompletedAt = &finished
-		snapshot := agent.snapshot
+		agent.cancel = nil
+		snapshot := cloneAgentSnapshot(agent.snapshot)
 		r.agentState.mu.Unlock()
 
-		text := snapshot.Result
-		if snapshot.Error != "" {
-			text = snapshot.Error
-		}
-		r.emit(Event{
+		event := Event{
 			Kind:      EventAgentCompleted,
 			AgentID:   snapshot.ID,
 			AgentName: snapshot.Name,
-			Text:      text,
-		})
+			Text:      snapshot.Result,
+		}
+		if snapshot.Status == AgentCancelled {
+			event.Kind = EventAgentCancelled
+			event.Text = snapshot.Error
+		} else if snapshot.Status == AgentFailed {
+			event.Text = snapshot.Error
+		}
+		r.emit(event)
 	}()
+}
+
+func (r *Runner) cancelTargets(id string, recursive bool) ([]string, error) {
+	r.agentState.mu.RLock()
+	defer r.agentState.mu.RUnlock()
+
+	if _, ok := r.agentState.agents[id]; !ok {
+		return nil, errors.New("agent not found")
+	}
+
+	visited := make(map[string]struct{})
+	targets := make([]string, 0, 4)
+	var visit func(string) error
+	visit = func(currentID string) error {
+		if _, seen := visited[currentID]; seen {
+			return nil
+		}
+		visited[currentID] = struct{}{}
+
+		agent, ok := r.agentState.agents[currentID]
+		if !ok {
+			return errors.New("agent not found")
+		}
+
+		if recursive {
+			for _, childID := range agent.snapshot.Children {
+				if err := visit(childID); err != nil {
+					return err
+				}
+			}
+		}
+
+		targets = append(targets, currentID)
+		return nil
+	}
+
+	if err := visit(id); err != nil {
+		return nil, err
+	}
+	return targets, nil
+}
+
+func cloneAgentSnapshot(snapshot AgentSnapshot) AgentSnapshot {
+	if len(snapshot.Children) > 0 {
+		snapshot.Children = append([]string(nil), snapshot.Children...)
+	}
+	return snapshot
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func (r *Runner) cloneForAgent(request SpawnRequest) *Runner {

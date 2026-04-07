@@ -6,10 +6,11 @@
 
 - Anthropic Messages API 适配
 - 多轮 agent loop
+- 自动上下文压缩与 context budget 保护
 - 本地工具调用
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
-- 子 agent 的 `spawn / send / wait / list`
+- 子 agent 的 `spawn / send / cancel / wait / list`
 - transcript 持久化与 `resume`
 
 ## 目录结构
@@ -35,6 +36,7 @@ xxx-code/
 - `grep`
 - `agent_spawn`
 - `agent_send`
+- `agent_cancel`
 - `agent_wait`
 - `agent_list`
 
@@ -59,7 +61,9 @@ REPL 内支持：
 - `:agents`
 - `:wait <agent-id>`
 - `:send <agent-id> <prompt>`
+- `:cancel <agent-id>`
 - `:history [n]`
+- `:compact`
 - `:save`
 - `:session`
 - `:quit`
@@ -92,6 +96,33 @@ go run ./cmd/xxx-code --resume
 
 如果某个子 agent 在 session 保存时仍处于运行中，恢复后会被标记为失败，需要重新发送任务。这是当前实现为了保持状态一致性做的显式处理。
 
+## 自动上下文压缩
+
+`xxx-code` 会在会话上下文接近预算时自动压缩较早的消息，把旧消息折叠成一条 summary，同时保留最近若干条消息原样传给模型。
+
+默认参数：
+
+```text
+context-budget = 120000
+compact-keep   = 12
+```
+
+可以调整：
+
+```bash
+go run ./cmd/xxx-code \
+  --context-budget 80000 \
+  --compact-keep 10
+```
+
+也可以在 REPL 里手动执行一次：
+
+```text
+:compact
+```
+
+当前的 budget 是近似 token 估算，不是 provider 返回的精确上下文计数，但已经足够拿来做稳定的长会话保护。
+
 ## 常用参数
 
 ```bash
@@ -99,6 +130,8 @@ go run ./cmd/xxx-code \
   --model claude-sonnet-4-5 \
   --max-turns 12 \
   --tool-timeout 2m \
+  --context-budget 120000 \
+  --compact-keep 12 \
   --cwd /path/to/project \
   --resume \
   --session-file /path/to/project/.xxx-code/session.json \
@@ -134,7 +167,11 @@ go run ./cmd/xxx-code \
 
 主会话在成功完成一轮后自动保存，子 agent 在 spawn / 完成时也会自动保存。这样即便是 REPL 模式，也更接近真正可持续协作的 agent，而不是临时命令行包装器。
 
-### 4. 依赖尽量轻
+### 4. 长上下文管理不是完全交给外部模型
+
+除了 session 持久化，runtime 自己也会做 context budget 管理。这样 agent 和子 agent 都能在更长时间尺度上持续工作，而不会因为 transcript 线性膨胀就很快失控。
+
+### 5. 依赖尽量轻
 
 当前实现只使用 Go 标准库，方便你后续继续扩展、嵌入、裁剪。
 
@@ -151,7 +188,6 @@ go test ./...
 - 流式 UI / 增量 token 输出
 - MCP 客户端
 - hook 系统
-- context compaction / token budgeting
 - 更细粒度的权限系统
 - remote agent / bridge / daemon
 - 更完整的任务调度、优先级与取消传播

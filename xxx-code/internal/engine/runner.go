@@ -12,11 +12,13 @@ import (
 type EventKind string
 
 const (
-	EventAssistantText  EventKind = "assistant_text"
-	EventToolCall       EventKind = "tool_call"
-	EventToolResult     EventKind = "tool_result"
-	EventAgentSpawned   EventKind = "agent_spawned"
-	EventAgentCompleted EventKind = "agent_completed"
+	EventAssistantText    EventKind = "assistant_text"
+	EventToolCall         EventKind = "tool_call"
+	EventToolResult       EventKind = "tool_result"
+	EventAgentSpawned     EventKind = "agent_spawned"
+	EventAgentCompleted   EventKind = "agent_completed"
+	EventAgentCancelled   EventKind = "agent_cancelled"
+	EventSessionCompacted EventKind = "session_compacted"
 )
 
 type Event struct {
@@ -28,15 +30,17 @@ type Event struct {
 }
 
 type RunnerConfig struct {
-	Model         string
-	SystemPrompt  string
-	MaxTokens     int
-	MaxTurns      int
-	Temperature   float64
-	WorkingDir    string
-	ToolTimeout   time.Duration
-	MaxAgentDepth int
-	EventHandler  func(Event)
+	Model               string
+	SystemPrompt        string
+	MaxTokens           int
+	MaxTurns            int
+	Temperature         float64
+	ContextBudget       int
+	CompactKeepMessages int
+	WorkingDir          string
+	ToolTimeout         time.Duration
+	MaxAgentDepth       int
+	EventHandler        func(Event)
 }
 
 type Runner struct {
@@ -59,6 +63,9 @@ func NewRunner(provider Provider, registry *Registry, config RunnerConfig) *Runn
 	}
 	if config.MaxTokens <= 0 {
 		config.MaxTokens = 16_384
+	}
+	if config.CompactKeepMessages <= 0 {
+		config.CompactKeepMessages = 12
 	}
 	if config.ToolTimeout <= 0 {
 		config.ToolTimeout = 2 * time.Minute
@@ -96,6 +103,16 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 	var finalText string
 
 	for turn := 0; turn < r.config.MaxTurns; turn++ {
+		if err := ctx.Err(); err != nil {
+			return RunResult{
+				FinalText: finalText,
+				Usage:     total,
+				Messages:  exec.Session.Snapshot(),
+			}, err
+		}
+
+		r.compactSessionIfNeeded(exec)
+
 		response, err := r.provider.CreateMessage(ctx, CompletionRequest{
 			Model:       r.config.Model,
 			System:      r.config.SystemPrompt,
@@ -161,6 +178,13 @@ func (r *Runner) runTurn(ctx context.Context, exec *ExecutionContext, prompt str
 			toolCtx, cancel := context.WithTimeout(ctx, r.config.ToolTimeout)
 			result, callErr := tool.Call(toolCtx, exec, toolBlock.Input)
 			cancel()
+			if errors.Is(callErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return RunResult{
+					FinalText: finalText,
+					Usage:     total,
+					Messages:  exec.Session.Snapshot(),
+				}, context.Canceled
+			}
 
 			if callErr != nil {
 				result = ToolResult{

@@ -45,20 +45,23 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		&tools.GrepTool{},
 		&tools.AgentSpawnTool{},
 		&tools.AgentSendTool{},
+		&tools.AgentCancelTool{},
 		&tools.AgentWaitTool{},
 		&tools.AgentListTool{},
 	)
 
 	provider := anthropic.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Version)
 	app.runner = engine.NewRunner(provider, registry, engine.RunnerConfig{
-		Model:         cfg.Model,
-		SystemPrompt:  cfg.SystemPrompt,
-		MaxTokens:     cfg.MaxTokens,
-		MaxTurns:      cfg.MaxTurns,
-		WorkingDir:    cfg.WorkingDir,
-		ToolTimeout:   cfg.ToolTimeout,
-		MaxAgentDepth: 3,
-		EventHandler:  app.handleEvent,
+		Model:               cfg.Model,
+		SystemPrompt:        cfg.SystemPrompt,
+		MaxTokens:           cfg.MaxTokens,
+		MaxTurns:            cfg.MaxTurns,
+		ContextBudget:       cfg.ContextBudget,
+		CompactKeepMessages: cfg.CompactKeep,
+		WorkingDir:          cfg.WorkingDir,
+		ToolTimeout:         cfg.ToolTimeout,
+		MaxAgentDepth:       3,
+		EventHandler:        app.handleEvent,
 	})
 
 	return app
@@ -135,7 +138,9 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":agents                   list spawned agents")
 		fmt.Fprintln(a.out, ":wait <agent-id>          wait for an agent and print its snapshot")
 		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing agent")
+		fmt.Fprintln(a.out, ":cancel <agent-id>        cancel a running agent and its descendants")
 		fmt.Fprintln(a.out, ":history [n]              print the latest n main-session messages (default 10)")
+		fmt.Fprintln(a.out, ":compact                  compact the main session immediately if it exceeds budget")
 		fmt.Fprintln(a.out, ":save                     persist the current main session and agents")
 		fmt.Fprintln(a.out, ":session                  print session file information")
 		return false, nil
@@ -175,6 +180,21 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		data, _ := json.MarshalIndent(snapshot, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
+	case ":cancel":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :cancel <agent-id>")
+			return false, nil
+		}
+		cancelCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		snapshot, err := a.runner.CancelAgent(cancelCtx, fields[1], true)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(snapshot, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
 	case ":history":
 		limit := 10
 		if len(fields) > 1 {
@@ -192,6 +212,21 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		data, _ := json.MarshalIndent(messages, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
+	case ":compact":
+		report, changed := a.runner.CompactSession(a.session)
+		if !changed {
+			fmt.Fprintln(a.out, "session did not exceed the current compaction budget")
+			return false, nil
+		}
+		fmt.Fprintf(
+			a.out,
+			"compacted session: ~%d -> ~%d tokens, %d -> %d messages\n",
+			report.BeforeTokens,
+			report.AfterTokens,
+			report.BeforeMessages,
+			report.AfterMessages,
+		)
+		return false, a.saveSession()
 	case ":save":
 		if err := a.saveSession(); err != nil {
 			fmt.Fprintf(a.errOut, "error: %v\n", err)
@@ -202,6 +237,8 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 	case ":session":
 		fmt.Fprintf(a.out, "session file: %s\n", a.config.SessionFile)
 		fmt.Fprintf(a.out, "main messages: %d\n", len(a.session.Snapshot()))
+		fmt.Fprintf(a.out, "approx tokens: %d\n", engine.EstimateTokens(a.session.Snapshot()))
+		fmt.Fprintf(a.out, "context budget: %d\n", a.config.ContextBudget)
 		fmt.Fprintf(a.out, "agents: %d\n", len(a.runner.ListAgents()))
 		return false, nil
 	default:
@@ -231,7 +268,7 @@ func (a *App) saveSession() error {
 func (a *App) handleEvent(event engine.Event) {
 	printEvent(a.config.Verbose, a.out, a.errOut, event)
 	switch event.Kind {
-	case engine.EventAgentSpawned, engine.EventAgentCompleted:
+	case engine.EventAgentSpawned, engine.EventAgentCompleted, engine.EventAgentCancelled:
 		if err := a.saveSession(); err != nil {
 			fmt.Fprintf(a.errOut, "autosave error: %v\n", err)
 		}
@@ -269,5 +306,15 @@ func printEvent(verbose bool, out, errOut io.Writer, event engine.Event) {
 		fmt.Fprintf(errOut, "spawned agent %s (%s)\n", event.AgentName, event.AgentID)
 	case engine.EventAgentCompleted:
 		fmt.Fprintf(errOut, "agent %s completed\n", event.AgentName)
+	case engine.EventAgentCancelled:
+		fmt.Fprintf(errOut, "agent %s cancelled\n", event.AgentName)
+	case engine.EventSessionCompacted:
+		if verbose {
+			agentPrefix := ""
+			if event.AgentName != "" {
+				agentPrefix = "[" + event.AgentName + "] "
+			}
+			fmt.Fprintf(errOut, "%ssession %s\n", agentPrefix, event.Text)
+		}
 	}
 }

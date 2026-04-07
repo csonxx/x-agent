@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type stubProvider struct {
@@ -133,5 +135,88 @@ func TestRunnerCanReuseSpawnedAgent(t *testing.T) {
 	joined := strings.Join(gotTexts, " | ")
 	if !strings.Contains(joined, "first task") || !strings.Contains(joined, "second task") {
 		t.Fatalf("expected preserved agent history, got %q", joined)
+	}
+}
+
+type blockingProvider struct {
+	once    sync.Once
+	started chan struct{}
+}
+
+func (p *blockingProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
+	_ = request
+	p.once.Do(func() {
+		close(p.started)
+	})
+	<-ctx.Done()
+	return CompletionResponse{}, ctx.Err()
+}
+
+func TestRunnerCanCancelAgent(t *testing.T) {
+	runner := NewRunner(&blockingProvider{
+		started: make(chan struct{}),
+	}, NewRegistry(), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     4,
+	})
+
+	snapshot, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "worker",
+		Prompt:     "long task",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blocking := runner.provider.(*blockingProvider)
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not start")
+	}
+
+	cancelled, err := runner.CancelAgent(context.Background(), snapshot.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != AgentCancelled {
+		t.Fatalf("expected cancelled status, got %s", cancelled.Status)
+	}
+}
+
+func TestRunnerCompactsLargeSession(t *testing.T) {
+	runner := NewRunner(&promptProvider{}, NewRegistry(), RunnerConfig{
+		Model:               "test-model",
+		SystemPrompt:        "test",
+		MaxTurns:            4,
+		ContextBudget:       20,
+		CompactKeepMessages: 2,
+	})
+
+	session := NewSession(
+		NewTextMessage(RoleUser, strings.Repeat("alpha ", 40)),
+		NewTextMessage(RoleAssistant, strings.Repeat("beta ", 40)),
+		NewTextMessage(RoleUser, strings.Repeat("gamma ", 30)),
+		NewTextMessage(RoleAssistant, strings.Repeat("delta ", 30)),
+		NewTextMessage(RoleUser, "recent question"),
+		NewTextMessage(RoleAssistant, "recent answer"),
+	)
+
+	report, changed := runner.CompactSession(session)
+	if !changed {
+		t.Fatal("expected session compaction")
+	}
+	if report.AfterMessages >= report.BeforeMessages {
+		t.Fatalf("expected fewer messages after compaction, got %+v", report)
+	}
+
+	messages := session.Snapshot()
+	if len(messages) != 5 {
+		t.Fatalf("expected compacted session length 5, got %d", len(messages))
+	}
+	if !strings.Contains(messages[0].Text(), "[compacted summary]") {
+		t.Fatalf("expected summary marker, got %q", messages[0].Text())
 	}
 }

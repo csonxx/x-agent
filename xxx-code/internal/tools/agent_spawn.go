@@ -94,7 +94,7 @@ func (t *AgentSpawnTool) Call(ctx context.Context, execCtx *engine.ExecutionCont
 		}, nil
 	}
 
-	if snapshot.Status == engine.AgentFailed {
+	if isTerminalAgentError(snapshot.Status) {
 		return engine.ToolResult{
 			Content: mustJSON(map[string]any{
 				"agent_id": snapshot.ID,
@@ -171,11 +171,52 @@ func (t *AgentSendTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 		}, nil
 	}
 
-	if snapshot.Status == engine.AgentFailed {
+	if isTerminalAgentError(snapshot.Status) {
 		return engine.ToolResult{
 			Content: mustJSON(snapshot),
 			IsError: true,
 		}, nil
+	}
+	return engine.ToolResult{Content: mustJSON(snapshot)}, nil
+}
+
+type AgentCancelTool struct{}
+
+type agentCancelInput struct {
+	AgentID   string `json:"agent_id"`
+	Recursive bool   `json:"recursive,omitempty"`
+}
+
+func (t *AgentCancelTool) Definition() engine.ToolDefinition {
+	return engine.ToolDefinition{
+		Name:        "agent_cancel",
+		Description: "Cancel a running sub-agent. Use recursive=true to cancel its descendant agents as well.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"agent_id": map[string]any{
+					"type":        "string",
+					"description": "The ID of the running agent.",
+				},
+				"recursive": map[string]any{
+					"type":        "boolean",
+					"description": "Cancel descendant agents too when true.",
+				},
+			},
+			"required": []string{"agent_id"},
+		},
+	}
+}
+
+func (t *AgentCancelTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	var args agentCancelInput
+	if err := json.Unmarshal(input, &args); err != nil {
+		return engine.ToolResult{}, err
+	}
+
+	snapshot, err := execCtx.Runner.CancelAgent(ctx, args.AgentID, args.Recursive)
+	if err != nil {
+		return engine.ToolResult{}, err
 	}
 	return engine.ToolResult{Content: mustJSON(snapshot)}, nil
 }
@@ -224,7 +265,7 @@ func (t *AgentWaitTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 	if err != nil {
 		return engine.ToolResult{}, err
 	}
-	if snapshot.Status == engine.AgentFailed {
+	if isTerminalAgentError(snapshot.Status) {
 		return engine.ToolResult{
 			Content: mustJSON(snapshot),
 			IsError: true,
@@ -259,4 +300,8 @@ func (t *AgentListTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 			"agents": execCtx.Runner.ListAgents(),
 		}),
 	}, nil
+}
+
+func isTerminalAgentError(status engine.AgentStatus) bool {
+	return status == engine.AgentFailed || status == engine.AgentCancelled
 }
