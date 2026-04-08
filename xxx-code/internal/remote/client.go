@@ -96,6 +96,26 @@ type TurnStreamEvent struct {
 	ErrorRetryOK bool            `json:"retryable,omitempty"`
 }
 
+type AuditEvent struct {
+	Timestamp         time.Time      `json:"timestamp"`
+	TraceID           string         `json:"trace_id,omitempty"`
+	RemoteAddr        string         `json:"remote_addr,omitempty"`
+	SessionID         string         `json:"session_id,omitempty"`
+	Action            string         `json:"action"`
+	Mode              string         `json:"mode,omitempty"`
+	Method            string         `json:"method,omitempty"`
+	Path              string         `json:"path,omitempty"`
+	AgentID           string         `json:"agent_id,omitempty"`
+	AgentName         string         `json:"agent_name,omitempty"`
+	ToolName          string         `json:"tool_name,omitempty"`
+	StatusCode        int            `json:"status_code,omitempty"`
+	Outcome           string         `json:"outcome,omitempty"`
+	Code              string         `json:"code,omitempty"`
+	Message           string         `json:"message,omitempty"`
+	RetryAfterSeconds int            `json:"retry_after_seconds,omitempty"`
+	Details           map[string]any `json:"details,omitempty"`
+}
+
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	baseURL = strings.TrimRight(baseURL, "/")
@@ -142,6 +162,20 @@ func (c *Client) ListSessions(ctx context.Context) ([]SessionSummary, error) {
 		return nil, err
 	}
 	return response.Sessions, nil
+}
+
+func (c *Client) ListAudit(ctx context.Context, limit int) ([]AuditEvent, error) {
+	var response struct {
+		Events []AuditEvent `json:"events"`
+	}
+	path := "/v1/audit"
+	if limit > 0 {
+		path += "?limit=" + strconv.Itoa(limit)
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Events, nil
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (SessionSummary, error) {
@@ -199,6 +233,20 @@ func (c *Client) ListMessages(ctx context.Context, sessionID string, limit int) 
 		return nil, err
 	}
 	return response.Messages, nil
+}
+
+func (c *Client) ListSessionAudit(ctx context.Context, sessionID string, limit int) ([]AuditEvent, error) {
+	var response struct {
+		Events []AuditEvent `json:"events"`
+	}
+	path := "/v1/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/audit"
+	if limit > 0 {
+		path += "?limit=" + strconv.Itoa(limit)
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Events, nil
 }
 
 func (c *Client) RunTurn(ctx context.Context, sessionID, prompt string, timeoutSeconds int) (TurnResult, SessionSummary, error) {

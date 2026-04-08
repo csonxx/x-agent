@@ -38,6 +38,9 @@ type Server struct {
 	out             io.Writer
 	errOut          io.Writer
 	logger          *diag.Logger
+	audit           *auditLogger
+	access          daemonAccessPolicy
+	rateLimiter     *requestRateLimiter
 
 	mu       sync.Mutex
 	sessions map[string]*managedSession
@@ -51,6 +54,7 @@ type managedSession struct {
 	session         *engine.Session
 	workflowManager *tools.WorkflowManager
 	mcpManager      *mcpruntime.Manager
+	audit           *auditLogger
 	out             io.Writer
 	errOut          io.Writer
 	sessionFile     string
@@ -194,12 +198,19 @@ func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFacto
 			return anthropic.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Version)
 		}
 	}
+	auditFile := strings.TrimSpace(cfg.DaemonAuditFile)
+	if auditFile == "" && strings.TrimSpace(cfg.DaemonDir) != "" {
+		auditFile = filepath.Join(cfg.DaemonDir, "audit.jsonl")
+	}
 	return &Server{
 		config:          cfg,
 		providerFactory: providerFactory,
 		out:             out,
 		errOut:          errOut,
 		logger:          diag.New(errOut, cfg.LogLevel),
+		audit:           newAuditLogger(auditFile),
+		access:          newDaemonAccessPolicy(cfg),
+		rateLimiter:     newRequestRateLimiter(cfg.DaemonRateLimitPerMinute, cfg.DaemonRateLimitBurst),
 		sessions:        make(map[string]*managedSession),
 	}
 }
@@ -256,6 +267,7 @@ func (s *Server) Close() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/v1/audit", s.handleAudit)
 	mux.HandleFunc("/v1/sessions", s.handleSessions)
 	mux.HandleFunc("/v1/sessions/", s.handleSessionRoutes)
 	return s.withDiagnostics(mux)
@@ -268,10 +280,48 @@ func (s *Server) withDiagnostics(next http.Handler) http.Handler {
 			traceID = diag.NewTraceID()
 		}
 		w.Header().Set(diag.TraceHeader, traceID)
+		remoteAddr := clientAddress(r)
+		meta := requestMeta{
+			TraceID:    traceID,
+			RemoteAddr: remoteAddr,
+		}
+		r = r.WithContext(withRequestMeta(r.Context(), meta))
+
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			if allowed, retryAfter := s.allowRequest(r); !allowed {
+				seconds := int(retryAfter.Round(time.Second) / time.Second)
+				if seconds <= 0 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(seconds))
+				err := fmt.Errorf("rate limit exceeded for %s", remoteAddr)
+				s.auditLog(r.Context(), AuditEvent{
+					Action:            "rate_limit",
+					Outcome:           "denied",
+					Code:              "rate_limited",
+					Message:           err.Error(),
+					RetryAfterSeconds: seconds,
+					Method:            r.Method,
+					Path:              r.URL.Path,
+				})
+				writeError(w, http.StatusTooManyRequests, err)
+				return
+			}
+		}
 
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		mode, sessionID := classifyDaemonRoute(r.URL.Path, r.Method)
+		s.auditLog(r.Context(), AuditEvent{
+			Action:     "request",
+			Mode:       mode,
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			SessionID:  sessionID,
+			StatusCode: recorder.status,
+			Outcome:    auditOutcomeForStatus(recorder.status),
+		})
 
 		s.logger.Debugf(
 			"trace=%s method=%s path=%s status=%d duration=%s remote=%s",
@@ -295,12 +345,39 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
+	if !s.requireAccess(w, r, daemonModeAudit, "") {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	limit, err := parseAuditLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	events, err := s.listAudit(limit, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.authorize(w, r) {
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireAccess(w, r, daemonModeSessionsRead, "") {
+			return
+		}
 		summaries, err := s.listSessions()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -311,6 +388,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		var req createSessionRequest
 		if err := decodeBody(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if !s.requireAccess(w, r, daemonModeSessionsWrite, strings.TrimSpace(req.SessionID)) {
 			return
 		}
 		session, err := s.openSession(r.Context(), strings.TrimSpace(req.SessionID), req.Resume)
@@ -340,6 +420,30 @@ func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := strings.Split(path, "/")
 	sessionID := parts[0]
+	mode := daemonModeSessionsRead
+	switch {
+	case len(parts) == 1:
+		mode = daemonModeSessionsRead
+	case parts[1] == "messages":
+		mode = daemonModeSessionsRead
+	case parts[1] == "turns":
+		mode = daemonModeTurns
+	case parts[1] == "save":
+		mode = daemonModeSave
+	case parts[1] == "policy", parts[1] == "hooks":
+		mode = daemonModeIntrospection
+	case parts[1] == "mcp":
+		mode = daemonModeMCP
+	case parts[1] == "agents":
+		mode = daemonModeAgents
+	case parts[1] == "workflows":
+		mode = daemonModeWorkflows
+	case parts[1] == "audit":
+		mode = daemonModeAudit
+	}
+	if !s.requireAccess(w, r, mode, sessionID) {
+		return
+	}
 
 	session, err := s.getSession(r.Context(), sessionID)
 	if err != nil {
@@ -407,6 +511,22 @@ func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentRoutes(w, r, session, parts[2:])
 	case "workflows":
 		s.handleWorkflowRoutes(w, r, session, parts[2:])
+	case "audit":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		limit, err := parseAuditLimit(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		events, err := s.listAudit(limit, sessionID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": events})
 	default:
 		http.NotFound(w, r)
 	}
@@ -897,6 +1017,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		id:          id,
 		config:      cfg,
 		session:     engine.NewSession(),
+		audit:       s.audit,
 		out:         s.out,
 		errOut:      s.errOut,
 		sessionFile: file,
@@ -1166,6 +1287,7 @@ func (m *managedSession) close() error {
 
 func (m *managedSession) handleEvent(event engine.Event) {
 	m.publishEvent(event)
+	m.auditEvent(event)
 	switch event.Kind {
 	case engine.EventAgentSpawned, engine.EventAgentCompleted, engine.EventAgentCancelled:
 		if err := m.save(); err != nil {
@@ -1210,6 +1332,122 @@ func (m *managedSession) publishEvent(event engine.Event) {
 		case subscriber.ch <- event:
 		default:
 		}
+	}
+}
+
+func (m *managedSession) auditEvent(event engine.Event) {
+	if m == nil || m.audit == nil {
+		return
+	}
+	record := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		SessionID: m.id,
+		Action:    string(event.Kind),
+		AgentID:   strings.TrimSpace(event.AgentID),
+		AgentName: strings.TrimSpace(event.AgentName),
+		ToolName:  strings.TrimSpace(event.ToolName),
+		Message:   strings.TrimSpace(event.Text),
+		Outcome:   "ok",
+	}
+	switch event.Kind {
+	case engine.EventToolResult:
+		if strings.Contains(strings.ToLower(record.Message), "by policy") {
+			record.Outcome = "denied"
+			record.Code = "policy_block"
+		}
+	case engine.EventHookError:
+		record.Outcome = "error"
+		record.Code = "hook_error"
+	case engine.EventAgentCancelled:
+		record.Outcome = "cancelled"
+	case engine.EventSessionCompacted:
+		record.Outcome = "compacted"
+	}
+	if err := m.audit.Log(record); err != nil {
+		fmt.Fprintf(m.errOut, "daemon audit error: %v\n", err)
+	}
+}
+
+func (s *Server) allowRequest(r *http.Request) (bool, time.Duration) {
+	if s == nil || s.rateLimiter == nil {
+		return true, 0
+	}
+	return s.rateLimiter.Allow(clientAddress(r), time.Now().UTC())
+}
+
+func (s *Server) requireAccess(w http.ResponseWriter, r *http.Request, mode, sessionID string) bool {
+	if s == nil {
+		return true
+	}
+	if err := s.access.Allow(mode, sessionID); err != nil {
+		s.auditLog(r.Context(), AuditEvent{
+			Action:    "acl",
+			Mode:      mode,
+			SessionID: strings.TrimSpace(sessionID),
+			Outcome:   "denied",
+			Code:      "forbidden",
+			Message:   err.Error(),
+			Method:    r.Method,
+			Path:      r.URL.Path,
+		})
+		writeError(w, http.StatusForbidden, err)
+		return false
+	}
+	return true
+}
+
+func (s *Server) listAudit(limit int, sessionID string) ([]AuditEvent, error) {
+	if s == nil || s.audit == nil {
+		return nil, nil
+	}
+	return s.audit.List(limit, sessionID)
+}
+
+func (s *Server) auditLog(ctx context.Context, event AuditEvent) {
+	if s == nil || s.audit == nil {
+		return
+	}
+	meta := requestMetaFromContext(ctx)
+	if strings.TrimSpace(event.TraceID) == "" {
+		event.TraceID = meta.TraceID
+	}
+	if strings.TrimSpace(event.RemoteAddr) == "" {
+		event.RemoteAddr = meta.RemoteAddr
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if err := s.audit.Log(event); err != nil {
+		s.logger.Errorf("audit write failed: %v", err)
+	}
+}
+
+func parseAuditLimit(r *http.Request) (int, error) {
+	if r == nil {
+		return 50, nil
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return 50, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("invalid limit: %s", raw)
+	}
+	if value > 1000 {
+		value = 1000
+	}
+	return value, nil
+}
+
+func auditOutcomeForStatus(status int) string {
+	switch {
+	case status >= 500:
+		return "error"
+	case status >= 400:
+		return "denied"
+	default:
+		return "ok"
 	}
 }
 
@@ -1285,6 +1523,14 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) == 1 {
 		return true
 	}
+	s.auditLog(r.Context(), AuditEvent{
+		Action:  "auth",
+		Outcome: "denied",
+		Code:    "unauthorized",
+		Message: "unauthorized",
+		Method:  r.Method,
+		Path:    r.URL.Path,
+	})
 	w.Header().Set("WWW-Authenticate", `Bearer realm="xxx-code"`)
 	writeError(w, http.StatusUnauthorized, errors.New("unauthorized"))
 	return false
@@ -1326,8 +1572,13 @@ func errorMetaForStatus(status int, err error) apiErrorMeta {
 		meta.Code = "agent_not_found"
 	case status == http.StatusUnauthorized:
 		meta.Code = "unauthorized"
+	case status == http.StatusForbidden:
+		meta.Code = "forbidden"
 	case status == http.StatusMethodNotAllowed:
 		meta.Code = "method_not_allowed"
+	case status == http.StatusTooManyRequests:
+		meta.Code = "rate_limited"
+		meta.Retryable = true
 	case status == http.StatusConflict:
 		meta.Code = "conflict"
 	case status == http.StatusRequestTimeout:
@@ -1363,6 +1614,11 @@ func normalizeErrorStatus(status int, err error) int {
 	case strings.HasPrefix(message, "workflow not found:"),
 		strings.HasPrefix(message, "agent not found"):
 		return http.StatusNotFound
+	case strings.Contains(message, "blocked by ACL"),
+		strings.Contains(message, "not allowed by ACL"):
+		return http.StatusForbidden
+	case strings.Contains(message, "rate limit exceeded"):
+		return http.StatusTooManyRequests
 	case strings.Contains(message, "already in progress"):
 		return http.StatusConflict
 	case strings.EqualFold(message, "MCP is not configured"),

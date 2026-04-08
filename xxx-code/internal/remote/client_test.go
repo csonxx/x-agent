@@ -222,6 +222,45 @@ func TestClientCanInspectPolicyHooksAndMCPStatus(t *testing.T) {
 	}
 }
 
+func TestClientCanListSessionAudit(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	session, err := client.EnsureSession(context.Background(), "audit-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), session.ID, "hello audit", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := client.ListSessionAudit(context.Background(), session.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected non-empty session audit stream")
+	}
+	foundTurnRequest := false
+	for _, event := range events {
+		if event.Action == "request" && event.Mode == "turns" {
+			foundTurnRequest = true
+			break
+		}
+	}
+	if !foundTurnRequest {
+		t.Fatalf("expected a turn request audit event, got %+v", events)
+	}
+
+	globalEvents, err := client.ListAudit(context.Background(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(globalEvents) == 0 {
+		t.Fatal("expected non-empty global audit stream")
+	}
+}
+
 func TestClientStreamTurn(t *testing.T) {
 	client, cleanup := newStreamingTestClient(t)
 	defer cleanup()

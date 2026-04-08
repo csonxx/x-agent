@@ -3,6 +3,20 @@
   "cwd": ".",
   "session_file": ".xxx-code/session.json",
   "daemon_dir": ".xxx-code/daemon",
+  "daemon_audit_file": ".xxx-code/daemon/audit.jsonl",
+  "daemon_rate_limit_per_minute": 120,
+  "daemon_rate_limit_burst": 20,
+  "daemon_allow_modes": [
+    "sessions_read",
+    "sessions_write",
+    "turns",
+    "introspection",
+    "mcp",
+    "agents",
+    "workflows",
+    "audit",
+    "save"
+  ],
   "mcp_config": ".mcp.json",
   "allow_read": [
     "."

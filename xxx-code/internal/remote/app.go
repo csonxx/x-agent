@@ -136,6 +136,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":quit                     exit the remote REPL")
 		fmt.Fprintln(a.out, ":session                  print remote session summary")
 		fmt.Fprintln(a.out, ":history [n]              print the latest n remote messages (default 10)")
+		fmt.Fprintln(a.out, ":audit [n]                print the latest n remote audit events for this session (default 20)")
 		fmt.Fprintln(a.out, ":mcp                      print remote MCP status")
 		fmt.Fprintln(a.out, ":mcp-resources [server]   list remote MCP resources")
 		fmt.Fprintln(a.out, ":mcp-resource-templates [server] list remote MCP resource templates")
@@ -170,6 +171,19 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		}
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			return a.client.ListMessages(ctx, a.sessionID, limit)
+		})
+	case ":audit":
+		limit := 20
+		if len(fields) > 1 {
+			value, err := strconv.Atoi(fields[1])
+			if err != nil || value < 0 {
+				fmt.Fprintf(a.errOut, "error: invalid audit limit: %s\n", fields[1])
+				return false, nil
+			}
+			limit = value
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ListSessionAudit(ctx, a.sessionID, limit)
 		})
 	case ":mcp":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {

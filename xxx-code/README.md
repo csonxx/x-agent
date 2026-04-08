@@ -14,6 +14,7 @@
 - 主会话流式文本输出
 - REPL、TUI 与单次执行模式
 - HTTP daemon、远程 bridge 与 session API
+- daemon 审计日志、ACL 与 per-client 速率限制
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
 - workflow 的 `list / get / tasks / resume`
@@ -128,6 +129,13 @@ go run ./cmd/xxx-code --config /path/to/config.json
 - `XXX_CODE_REMOTE_URL`
 - `XXX_CODE_REMOTE_TOKEN`
 - `XXX_CODE_DAEMON_TOKEN`
+- `XXX_CODE_DAEMON_AUDIT_FILE`
+- `XXX_CODE_DAEMON_ALLOW_MODES`
+- `XXX_CODE_DAEMON_DENY_MODES`
+- `XXX_CODE_DAEMON_ALLOW_SESSION_PREFIX`
+- `XXX_CODE_DAEMON_DENY_SESSION_PREFIX`
+- `XXX_CODE_DAEMON_RATE_LIMIT_PER_MINUTE`
+- `XXX_CODE_DAEMON_RATE_LIMIT_BURST`
 - `XXX_CODE_LOG_LEVEL`
 - `XXX_CODE_LOG_FILE`
 - `XXX_CODE_CONFIG`
@@ -165,6 +173,7 @@ REPL 内支持：
 - `:send <agent-id> <prompt>`
 - `:cancel <agent-id>`
 - `:history [n]`
+- `:audit [n]`
 - `:compact`
 - `:policy`
 - `:hooks`
@@ -217,6 +226,27 @@ go run ./cmd/xxx-code \
   --daemon-token dev-secret
 ```
 
+如果你还希望 daemon 自带基础治理能力，可以再加上审计、ACL 和限流：
+
+```bash
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 127.0.0.1:7331 \
+  --daemon-token dev-secret \
+  --daemon-audit-file .xxx-code/daemon/audit.jsonl \
+  --daemon-allow-modes sessions_read,sessions_write,turns,agents,workflows,audit \
+  --daemon-allow-session-prefix team- \
+  --daemon-rate-limit-per-minute 120 \
+  --daemon-rate-limit-burst 20
+```
+
+这些参数的含义分别是：
+
+- `daemon_audit_file`: 以 JSONL 方式落审计记录
+- `daemon_allow_modes / daemon_deny_modes`: 控制哪些 API 面可以调
+- `daemon_allow_session_prefix / daemon_deny_session_prefix`: 控制哪些 session ID 前缀可访问
+- `daemon_rate_limit_per_minute / daemon_rate_limit_burst`: 控制每个 client address 的请求速率
+
 daemon 会把远程 session 存到：
 
 ```text
@@ -234,10 +264,12 @@ go run ./cmd/xxx-code \
 目前内置的是一套简单 JSON API，比较常用的入口有：
 
 - `GET /healthz`
+- `GET /v1/audit?limit=50`
 - `GET /v1/sessions`
 - `POST /v1/sessions`
 - `GET /v1/sessions/{id}`
 - `GET /v1/sessions/{id}/messages?limit=20`
+- `GET /v1/sessions/{id}/audit?limit=50`
 - `POST /v1/sessions/{id}/turns`
 - `POST /v1/sessions/{id}/turns/stream`
 - `GET /v1/sessions/{id}/policy`
@@ -300,6 +332,16 @@ daemon 现在会为每个请求生成或透传：
 - status
 - duration
 - remote addr
+
+如果开启了 `daemon_audit_file`，daemon 还会额外把这些事件追加到 JSONL audit log：
+
+- request 完成记录
+- auth failure
+- ACL deny
+- rate limit deny
+- tool call / tool result
+- policy block
+- agent 生命周期事件
 
 ## Remote Bridge 模式
 
@@ -387,6 +429,7 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:help`
 - `:session`
 - `:history [n]`
+- `:audit [n]`
 - `:mcp`
 - `:mcp-resources [server]`
 - `:mcp-resource-templates [server]`
@@ -745,6 +788,21 @@ go run ./cmd/xxx-code \
 
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
+## Daemon 治理
+
+daemon 审计日志默认会写到：
+
+```text
+.xxx-code/daemon/audit.jsonl
+```
+
+每一行都是一条独立 JSON 事件，适合直接配合 `jq`、`rg`、日志采集器或后续 SIEM 管道消费。现在支持两种查询入口：
+
+- `GET /v1/audit?limit=50`
+- `GET /v1/sessions/{id}/audit?limit=50`
+
+其中 session 级 audit 更适合排一个具体任务或 workflow；全局 audit 更适合查 auth failure、ACL deny 和速率限制。
+
 ## 常用参数
 
 ```bash
@@ -763,6 +821,9 @@ go run ./cmd/xxx-code \
   --allow-write ./generated \
   --allow-tools read_file,glob,grep,bash \
   --allow-bash-prefix "git status,go test" \
+  --daemon-audit-file .xxx-code/daemon/audit.jsonl \
+  --daemon-allow-modes sessions_read,sessions_write,turns,agents,workflows,audit \
+  --daemon-rate-limit-per-minute 120 \
   --resume \
   --session-file /path/to/project/.xxx-code/session.json \
   --print "实现一个功能"

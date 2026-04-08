@@ -25,6 +25,8 @@ type blockingProvider struct {
 	started chan struct{}
 }
 
+type toolAuditProvider struct{}
+
 func (p *daemonTestProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 	text := ""
@@ -48,6 +50,32 @@ func (p *blockingProvider) CreateMessage(ctx context.Context, request engine.Com
 	}
 	<-ctx.Done()
 	return engine.CompletionResponse{}, ctx.Err()
+}
+
+func (p *toolAuditProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	if toolResult, ok := latestDaemonToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+toolResult),
+		}, nil
+	}
+	if latestDaemonUserText(request.Messages) == "policy block" {
+		input, _ := json.Marshal(map[string]any{
+			"command": "pwd",
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "attempting bash"},
+					{Type: engine.BlockToolUse, ID: "toolu_bash", Name: "bash", Input: input},
+				},
+			},
+		}, nil
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestDaemonUserText(request.Messages)),
+	}, nil
 }
 
 func TestDaemonSessionLifecycle(t *testing.T) {
@@ -346,6 +374,127 @@ func TestDaemonAddsTraceIDHeader(t *testing.T) {
 	}
 }
 
+func TestDaemonAuditLogsAuthFailuresAndPolicyBlocks(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonToken = "secret-token"
+	cfg.BashEnabled = false
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &toolAuditProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/sessions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+
+	created := doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions", map[string]any{
+		"session_id": "audit-session",
+	}), http.StatusCreated)
+	sessionID := created["session"].(map[string]any)["id"].(string)
+
+	doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions/"+sessionID+"/turns", map[string]any{
+		"prompt": "policy block",
+	}), http.StatusOK)
+
+	globalAudit := doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodGet, testServer.URL+"/v1/audit?limit=50", nil), http.StatusOK)
+	if !hasAuditEvent(globalAudit["events"].([]any), "auth", "unauthorized") {
+		t.Fatalf("expected auth failure in global audit log, got %+v", globalAudit)
+	}
+
+	sessionAudit := doAuthorizedJSON(t, "secret-token", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions/"+sessionID+"/audit?limit=50", nil), http.StatusOK)
+	if !hasAuditEvent(sessionAudit["events"].([]any), "tool_result", "policy_block") {
+		t.Fatalf("expected policy block in session audit log, got %+v", sessionAudit)
+	}
+}
+
+func TestDaemonACLRestrictsModesAndSessionPrefixes(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonAllowModes = []string{daemonModeSessionsRead, daemonModeSessionsWrite}
+	cfg.DaemonAllowSessionPrefixes = []string{"team-"}
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	getJSON(t, testServer.URL+"/v1/sessions", http.StatusOK)
+
+	blocked := doJSON(t, mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions", map[string]any{
+		"session_id": "other-1",
+	}), http.StatusForbidden)
+	if blocked["code"] != "forbidden" {
+		t.Fatalf("expected forbidden code for blocked prefix, got %+v", blocked)
+	}
+
+	created := doJSON(t, mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions", map[string]any{
+		"session_id": "team-1",
+	}), http.StatusCreated)
+	sessionID := created["session"].(map[string]any)["id"].(string)
+
+	turnPayload := doJSON(t, mustRequest(t, http.MethodPost, testServer.URL+"/v1/sessions/"+sessionID+"/turns", map[string]any{
+		"prompt": "blocked by mode",
+	}), http.StatusForbidden)
+	if turnPayload["code"] != "forbidden" {
+		t.Fatalf("expected forbidden code for blocked mode, got %+v", turnPayload)
+	}
+}
+
+func TestDaemonRateLimitRejectsBurst(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonRateLimitPerMinute = 1
+	cfg.DaemonRateLimitBurst = 1
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	getJSON(t, testServer.URL+"/v1/sessions", http.StatusOK)
+
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/sessions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 429, got %d: %s", resp.StatusCode, string(body))
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After header on rate limited response")
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["code"] != "rate_limited" {
+		t.Fatalf("expected rate_limited code, got %+v", payload)
+	}
+}
+
 func newTestDaemon(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := newTestConfig(t)
@@ -420,4 +569,70 @@ func doJSON(t *testing.T, req *http.Request, wantStatus int) map[string]any {
 		t.Fatal(err)
 	}
 	return payload
+}
+
+func doAuthorizedJSON(t *testing.T, token string, req *http.Request, wantStatus int) map[string]any {
+	t.Helper()
+	req.Header.Set("Authorization", "Bearer "+token)
+	return doJSON(t, req, wantStatus)
+}
+
+func mustRequest(t *testing.T, method, url string, body any) *http.Request {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req
+}
+
+func hasAuditEvent(events []any, action, code string) bool {
+	for _, raw := range events {
+		event, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		gotAction, _ := event["action"].(string)
+		if strings.TrimSpace(gotAction) != action {
+			continue
+		}
+		if code == "" {
+			return true
+		}
+		if got, _ := event["code"].(string); got == code {
+			return true
+		}
+	}
+	return false
+}
+
+func latestDaemonUserText(messages []engine.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == engine.RoleUser {
+			return messages[i].Text()
+		}
+	}
+	return ""
+}
+
+func latestDaemonToolResult(messages []engine.Message) (string, bool) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		for _, block := range messages[i].Content {
+			if block.Type == engine.BlockToolResult {
+				return strings.TrimSpace(block.Result), true
+			}
+		}
+	}
+	return "", false
 }

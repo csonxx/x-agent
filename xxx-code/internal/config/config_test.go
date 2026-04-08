@@ -87,6 +87,44 @@ func TestLoadArgsVersionModesDoNotRequireAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"ANTHROPIC_API_KEY":                   "test-key",
+		"XXX_CODE_DAEMON_ALLOW_MODES":         "sessions_read,turns",
+		"XXX_CODE_DAEMON_DENY_SESSION_PREFIX": "blocked-",
+		"XXX_CODE_DAEMON_RATE_LIMIT_BURST":    "12",
+	}
+	cfg, err := LoadArgs([]string{
+		"--daemon-audit-file", "logs/audit.jsonl",
+		"--daemon-deny-modes", "mcp,audit",
+		"--daemon-allow-session-prefix", "team-",
+		"--daemon-rate-limit-per-minute", "30",
+	}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.DaemonAuditFile != filepath.Join(dir, "logs", "audit.jsonl") {
+		t.Fatalf("unexpected daemon audit file: %q", cfg.DaemonAuditFile)
+	}
+	if len(cfg.DaemonAllowModes) != 2 || cfg.DaemonAllowModes[0] != "sessions_read" || cfg.DaemonAllowModes[1] != "turns" {
+		t.Fatalf("unexpected daemon allow modes: %+v", cfg.DaemonAllowModes)
+	}
+	if len(cfg.DaemonDenyModes) != 2 || cfg.DaemonDenyModes[0] != "mcp" || cfg.DaemonDenyModes[1] != "audit" {
+		t.Fatalf("unexpected daemon deny modes: %+v", cfg.DaemonDenyModes)
+	}
+	if len(cfg.DaemonAllowSessionPrefixes) != 1 || cfg.DaemonAllowSessionPrefixes[0] != "team-" {
+		t.Fatalf("unexpected daemon allow session prefixes: %+v", cfg.DaemonAllowSessionPrefixes)
+	}
+	if len(cfg.DaemonDenySessionPrefixes) != 1 || cfg.DaemonDenySessionPrefixes[0] != "blocked-" {
+		t.Fatalf("unexpected daemon deny session prefixes: %+v", cfg.DaemonDenySessionPrefixes)
+	}
+	if cfg.DaemonRateLimitPerMinute != 30 || cfg.DaemonRateLimitBurst != 12 {
+		t.Fatalf("unexpected daemon rate limit config: per_minute=%d burst=%d", cfg.DaemonRateLimitPerMinute, cfg.DaemonRateLimitBurst)
+	}
+}
+
 func lookupFromMap(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]

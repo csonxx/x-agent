@@ -60,14 +60,14 @@
 
 ## P2 安全与治理
 
-- [ ] daemon 审计日志
-  - session、turn、tool、policy block、auth 失败记录
-- [ ] daemon ACL
-  - 不只是 bearer auth，还包括 session / tool / mode 级控制
+- [x] daemon 审计日志
+  - 已补 request / auth failure / ACL deny / rate limit / tool / policy block / agent 事件记录
+- [x] daemon ACL
+  - 已补 API mode 与 session prefix 级访问控制
 - [ ] token 轮换与部署建议
   - 反向代理、TLS、最小暴露面
-- [ ] 速率限制与资源上限
-  - 避免单 client 打满整机
+- [x] 速率限制与资源上限
+  - 已补 per-client request rate limit / burst
 
 ## P2 生态与扩展
 
@@ -92,9 +92,9 @@
 
 当前默认推进顺序：
 
-1. 优先进入 P2 安全与治理
+1. 先补 token 轮换、TLS 反代和部署建议
 2. 再继续做 MCP / provider / hooks 这一层生态扩展
-3. 保持测试和发布链路持续跟进
+3. 保持测试、审计和发布链路持续跟进
 
 ## 完成标准
 

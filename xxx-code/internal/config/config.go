@@ -30,113 +30,132 @@ Guidelines:
 - Keep final user-facing answers concise and practical.`
 
 type Config struct {
-	APIKey            string
-	BaseURL           string
-	Version           string
-	Model             string
-	MaxTurns          int
-	MaxTokens         int
-	MaxParallelAgents int
-	ContextBudget     int
-	CompactKeep       int
-	Daemon            bool
-	DaemonListenAddr  string
-	DaemonToken       string
-	DaemonDir         string
-	RemoteURL         string
-	RemoteToken       string
-	RemoteSession     string
-	RemoteList        bool
-	WorkingDir        string
-	SessionFile       string
-	MCPConfigFile     string
-	ReadRoots         []string
-	WriteRoots        []string
-	AllowedTools      []string
-	BlockedTools      []string
-	BashAllowPrefixes []string
-	BashDenyPrefixes  []string
-	ReadOnly          bool
-	BashEnabled       bool
-	HookBeforeTool    string
-	HookAfterTool     string
-	HookAfterTurn     string
-	HookAgentEvent    string
-	HookTimeout       time.Duration
-	Resume            bool
-	Print             bool
-	TUI               bool
-	Stream            bool
-	Verbose           bool
-	LogLevel          diag.Level
-	LogFile           string
-	ConfigFile        string
-	ShowVersion       bool
-	SystemPrompt      string
-	ToolTimeout       time.Duration
-	Prompt            string
+	APIKey                     string
+	BaseURL                    string
+	Version                    string
+	Model                      string
+	MaxTurns                   int
+	MaxTokens                  int
+	MaxParallelAgents          int
+	ContextBudget              int
+	CompactKeep                int
+	Daemon                     bool
+	DaemonListenAddr           string
+	DaemonToken                string
+	DaemonDir                  string
+	DaemonAuditFile            string
+	DaemonAllowModes           []string
+	DaemonDenyModes            []string
+	DaemonAllowSessionPrefixes []string
+	DaemonDenySessionPrefixes  []string
+	DaemonRateLimitPerMinute   int
+	DaemonRateLimitBurst       int
+	RemoteURL                  string
+	RemoteToken                string
+	RemoteSession              string
+	RemoteList                 bool
+	WorkingDir                 string
+	SessionFile                string
+	MCPConfigFile              string
+	ReadRoots                  []string
+	WriteRoots                 []string
+	AllowedTools               []string
+	BlockedTools               []string
+	BashAllowPrefixes          []string
+	BashDenyPrefixes           []string
+	ReadOnly                   bool
+	BashEnabled                bool
+	HookBeforeTool             string
+	HookAfterTool              string
+	HookAfterTurn              string
+	HookAgentEvent             string
+	HookTimeout                time.Duration
+	Resume                     bool
+	Print                      bool
+	TUI                        bool
+	Stream                     bool
+	Verbose                    bool
+	LogLevel                   diag.Level
+	LogFile                    string
+	ConfigFile                 string
+	ShowVersion                bool
+	SystemPrompt               string
+	ToolTimeout                time.Duration
+	Prompt                     string
 }
 
 type fileConfig struct {
-	APIKey            *string  `json:"api_key,omitempty"`
-	BaseURL           *string  `json:"base_url,omitempty"`
-	AnthropicVersion  *string  `json:"anthropic_version,omitempty"`
-	Model             *string  `json:"model,omitempty"`
-	MaxTurns          *int     `json:"max_turns,omitempty"`
-	MaxTokens         *int     `json:"max_tokens,omitempty"`
-	MaxParallelAgents *int     `json:"max_parallel_agents,omitempty"`
-	ContextBudget     *int     `json:"context_budget,omitempty"`
-	CompactKeep       *int     `json:"compact_keep,omitempty"`
-	Daemon            *bool    `json:"daemon,omitempty"`
-	Listen            *string  `json:"listen,omitempty"`
-	DaemonToken       *string  `json:"daemon_token,omitempty"`
-	DaemonDir         *string  `json:"daemon_dir,omitempty"`
-	RemoteURL         *string  `json:"remote_url,omitempty"`
-	RemoteToken       *string  `json:"remote_token,omitempty"`
-	RemoteSession     *string  `json:"remote_session,omitempty"`
-	RemoteList        *bool    `json:"remote_list_sessions,omitempty"`
-	WorkingDir        *string  `json:"cwd,omitempty"`
-	SessionFile       *string  `json:"session_file,omitempty"`
-	MCPConfigFile     *string  `json:"mcp_config,omitempty"`
-	AllowRead         []string `json:"allow_read,omitempty"`
-	AllowWrite        []string `json:"allow_write,omitempty"`
-	AllowTools        []string `json:"allow_tools,omitempty"`
-	DenyTools         []string `json:"deny_tools,omitempty"`
-	AllowBashPrefix   []string `json:"allow_bash_prefix,omitempty"`
-	DenyBashPrefix    []string `json:"deny_bash_prefix,omitempty"`
-	ReadOnly          *bool    `json:"read_only,omitempty"`
-	BashEnabled       *bool    `json:"bash,omitempty"`
-	HookBeforeTool    *string  `json:"hook_before_tool,omitempty"`
-	HookAfterTool     *string  `json:"hook_after_tool,omitempty"`
-	HookAfterTurn     *string  `json:"hook_after_turn,omitempty"`
-	HookAgentEvent    *string  `json:"hook_agent_event,omitempty"`
-	HookTimeout       *string  `json:"hook_timeout,omitempty"`
-	ToolTimeout       *string  `json:"tool_timeout,omitempty"`
-	Resume            *bool    `json:"resume,omitempty"`
-	Print             *bool    `json:"print,omitempty"`
-	TUI               *bool    `json:"tui,omitempty"`
-	Stream            *bool    `json:"stream,omitempty"`
-	Verbose           *bool    `json:"verbose,omitempty"`
-	Debug             *bool    `json:"debug,omitempty"`
-	LogLevel          *string  `json:"log_level,omitempty"`
-	LogFile           *string  `json:"log_file,omitempty"`
-	SystemPrompt      *string  `json:"system_prompt,omitempty"`
-	SystemPromptFile  *string  `json:"system_prompt_file,omitempty"`
-	Prompt            *string  `json:"prompt,omitempty"`
+	APIKey                     *string  `json:"api_key,omitempty"`
+	BaseURL                    *string  `json:"base_url,omitempty"`
+	AnthropicVersion           *string  `json:"anthropic_version,omitempty"`
+	Model                      *string  `json:"model,omitempty"`
+	MaxTurns                   *int     `json:"max_turns,omitempty"`
+	MaxTokens                  *int     `json:"max_tokens,omitempty"`
+	MaxParallelAgents          *int     `json:"max_parallel_agents,omitempty"`
+	ContextBudget              *int     `json:"context_budget,omitempty"`
+	CompactKeep                *int     `json:"compact_keep,omitempty"`
+	Daemon                     *bool    `json:"daemon,omitempty"`
+	Listen                     *string  `json:"listen,omitempty"`
+	DaemonToken                *string  `json:"daemon_token,omitempty"`
+	DaemonDir                  *string  `json:"daemon_dir,omitempty"`
+	DaemonAuditFile            *string  `json:"daemon_audit_file,omitempty"`
+	DaemonAllowModes           []string `json:"daemon_allow_modes,omitempty"`
+	DaemonDenyModes            []string `json:"daemon_deny_modes,omitempty"`
+	DaemonAllowSessionPrefixes []string `json:"daemon_allow_session_prefix,omitempty"`
+	DaemonDenySessionPrefixes  []string `json:"daemon_deny_session_prefix,omitempty"`
+	DaemonRateLimitPerMinute   *int     `json:"daemon_rate_limit_per_minute,omitempty"`
+	DaemonRateLimitBurst       *int     `json:"daemon_rate_limit_burst,omitempty"`
+	RemoteURL                  *string  `json:"remote_url,omitempty"`
+	RemoteToken                *string  `json:"remote_token,omitempty"`
+	RemoteSession              *string  `json:"remote_session,omitempty"`
+	RemoteList                 *bool    `json:"remote_list_sessions,omitempty"`
+	WorkingDir                 *string  `json:"cwd,omitempty"`
+	SessionFile                *string  `json:"session_file,omitempty"`
+	MCPConfigFile              *string  `json:"mcp_config,omitempty"`
+	AllowRead                  []string `json:"allow_read,omitempty"`
+	AllowWrite                 []string `json:"allow_write,omitempty"`
+	AllowTools                 []string `json:"allow_tools,omitempty"`
+	DenyTools                  []string `json:"deny_tools,omitempty"`
+	AllowBashPrefix            []string `json:"allow_bash_prefix,omitempty"`
+	DenyBashPrefix             []string `json:"deny_bash_prefix,omitempty"`
+	ReadOnly                   *bool    `json:"read_only,omitempty"`
+	BashEnabled                *bool    `json:"bash,omitempty"`
+	HookBeforeTool             *string  `json:"hook_before_tool,omitempty"`
+	HookAfterTool              *string  `json:"hook_after_tool,omitempty"`
+	HookAfterTurn              *string  `json:"hook_after_turn,omitempty"`
+	HookAgentEvent             *string  `json:"hook_agent_event,omitempty"`
+	HookTimeout                *string  `json:"hook_timeout,omitempty"`
+	ToolTimeout                *string  `json:"tool_timeout,omitempty"`
+	Resume                     *bool    `json:"resume,omitempty"`
+	Print                      *bool    `json:"print,omitempty"`
+	TUI                        *bool    `json:"tui,omitempty"`
+	Stream                     *bool    `json:"stream,omitempty"`
+	Verbose                    *bool    `json:"verbose,omitempty"`
+	Debug                      *bool    `json:"debug,omitempty"`
+	LogLevel                   *string  `json:"log_level,omitempty"`
+	LogFile                    *string  `json:"log_file,omitempty"`
+	SystemPrompt               *string  `json:"system_prompt,omitempty"`
+	SystemPromptFile           *string  `json:"system_prompt_file,omitempty"`
+	Prompt                     *string  `json:"prompt,omitempty"`
 }
 
 type rawOptions struct {
-	workingDir       string
-	sessionFile      string
-	daemonDir        string
-	mcpConfigFile    string
-	systemPromptFile string
-	readRoots        []string
-	writeRoots       []string
-	allowedTools     []string
-	blockedTools     []string
-	bashAllow        []string
-	bashDeny         []string
+	workingDir                 string
+	sessionFile                string
+	daemonDir                  string
+	daemonAuditFile            string
+	mcpConfigFile              string
+	systemPromptFile           string
+	readRoots                  []string
+	writeRoots                 []string
+	allowedTools               []string
+	blockedTools               []string
+	bashAllow                  []string
+	bashDeny                   []string
+	daemonAllowModes           []string
+	daemonDenyModes            []string
+	daemonAllowSessionPrefixes []string
+	daemonDenySessionPrefixes  []string
 }
 
 func Load() (Config, error) {
@@ -202,6 +221,8 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	fs.BoolVar(&cfg.Daemon, "daemon", cfg.Daemon, "Run xxx-code as a persistent HTTP daemon")
 	fs.StringVar(&cfg.DaemonListenAddr, "listen", cfg.DaemonListenAddr, "Listen address for daemon mode")
 	fs.StringVar(&cfg.DaemonToken, "daemon-token", cfg.DaemonToken, "Optional bearer token required by the daemon for /v1/* requests")
+	fs.IntVar(&cfg.DaemonRateLimitPerMinute, "daemon-rate-limit-per-minute", cfg.DaemonRateLimitPerMinute, "Optional per-client request rate limit for daemon /v1/* requests")
+	fs.IntVar(&cfg.DaemonRateLimitBurst, "daemon-rate-limit-burst", cfg.DaemonRateLimitBurst, "Burst capacity for the daemon per-client rate limiter")
 	fs.StringVar(&cfg.RemoteURL, "remote-url", cfg.RemoteURL, "Daemon base URL to use as a remote bridge")
 	fs.StringVar(&cfg.RemoteToken, "remote-token", cfg.RemoteToken, "Bearer token to send when connecting to a protected daemon")
 	fs.StringVar(&cfg.RemoteSession, "remote-session", cfg.RemoteSession, "Remote daemon session ID to open or create")
@@ -224,6 +245,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	cwdFlag := fs.String("cwd", raw.workingDir, "Working directory")
 	sessionFileFlag := fs.String("session-file", raw.sessionFile, "Path to the persisted session file")
 	daemonDirFlag := fs.String("daemon-dir", raw.daemonDir, "Directory for daemon-managed remote sessions")
+	daemonAuditFileFlag := fs.String("daemon-audit-file", raw.daemonAuditFile, "Path to the daemon JSONL audit log; defaults to <daemon-dir>/audit.jsonl")
 	mcpConfigFlag := fs.String("mcp-config", raw.mcpConfigFile, "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
 	readRootsFlag := fs.String("allow-read", joinCSV(raw.readRoots), "Comma-separated read roots; the working directory is always included")
 	writeRootsFlag := fs.String("allow-write", joinCSV(raw.writeRoots), "Comma-separated write roots; the working directory is always included unless --read-only is set")
@@ -231,6 +253,10 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	denyToolsFlag := fs.String("deny-tools", joinCSV(raw.blockedTools), "Comma-separated tool denylist")
 	allowBashPrefixFlag := fs.String("allow-bash-prefix", joinCSV(raw.bashAllow), "Comma-separated allowed bash command prefixes")
 	denyBashPrefixFlag := fs.String("deny-bash-prefix", joinCSV(raw.bashDeny), "Comma-separated blocked bash command prefixes")
+	daemonAllowModesFlag := fs.String("daemon-allow-modes", joinCSV(raw.daemonAllowModes), "Comma-separated daemon API mode allowlist: sessions_read,sessions_write,turns,introspection,mcp,agents,workflows,audit,save")
+	daemonDenyModesFlag := fs.String("daemon-deny-modes", joinCSV(raw.daemonDenyModes), "Comma-separated daemon API mode denylist")
+	daemonAllowSessionPrefixFlag := fs.String("daemon-allow-session-prefix", joinCSV(raw.daemonAllowSessionPrefixes), "Comma-separated session ID prefixes that the daemon may access")
+	daemonDenySessionPrefixFlag := fs.String("daemon-deny-session-prefix", joinCSV(raw.daemonDenySessionPrefixes), "Comma-separated session ID prefixes that the daemon must reject")
 	hookBeforeToolFlag := fs.String("hook-before-tool", cfg.HookBeforeTool, "Shell command to run before each tool call; non-zero exit blocks the tool")
 	hookAfterToolFlag := fs.String("hook-after-tool", cfg.HookAfterTool, "Shell command to run after each tool call")
 	hookAfterTurnFlag := fs.String("hook-after-turn", cfg.HookAfterTurn, "Shell command to run after each turn")
@@ -264,6 +290,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	cfg.WorkingDir = filepath.Clean(resolvePath(currentWD, *cwdFlag))
 	cfg.SessionFile = defaultSessionFile(cfg.WorkingDir, *sessionFileFlag)
 	cfg.DaemonDir = defaultDaemonDir(cfg.WorkingDir, *daemonDirFlag)
+	cfg.DaemonAuditFile = defaultDaemonAuditFile(cfg.WorkingDir, cfg.DaemonDir, *daemonAuditFileFlag)
 	cfg.LogFile = resolveOptionalPath(cfg.WorkingDir, *logFileFlag)
 	cfg.ConfigFile = strings.TrimSpace(*configFileFlag)
 	if cfg.ConfigFile != "" {
@@ -276,6 +303,10 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	cfg.BlockedTools = parseCSV(*denyToolsFlag)
 	cfg.BashAllowPrefixes = parseCSV(*allowBashPrefixFlag)
 	cfg.BashDenyPrefixes = parseCSV(*denyBashPrefixFlag)
+	cfg.DaemonAllowModes = parseCSV(*daemonAllowModesFlag)
+	cfg.DaemonDenyModes = parseCSV(*daemonDenyModesFlag)
+	cfg.DaemonAllowSessionPrefixes = parseCSV(*daemonAllowSessionPrefixFlag)
+	cfg.DaemonDenySessionPrefixes = parseCSV(*daemonDenySessionPrefixFlag)
 	cfg.HookBeforeTool = strings.TrimSpace(*hookBeforeToolFlag)
 	cfg.HookAfterTool = strings.TrimSpace(*hookAfterToolFlag)
 	cfg.HookAfterTurn = strings.TrimSpace(*hookAfterTurnFlag)
@@ -310,21 +341,22 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 
 func defaultConfig() Config {
 	return Config{
-		BaseURL:           "https://api.anthropic.com",
-		Version:           "2023-06-01",
-		Model:             "claude-sonnet-4-5",
-		MaxTurns:          12,
-		MaxTokens:         16384,
-		MaxParallelAgents: 4,
-		ContextBudget:     120000,
-		CompactKeep:       12,
-		DaemonListenAddr:  "127.0.0.1:7331",
-		BashEnabled:       true,
-		Stream:            true,
-		HookTimeout:       30 * time.Second,
-		ToolTimeout:       2 * time.Minute,
-		SystemPrompt:      defaultSystemPrompt,
-		LogLevel:          diag.LevelInfo,
+		BaseURL:              "https://api.anthropic.com",
+		Version:              "2023-06-01",
+		Model:                "claude-sonnet-4-5",
+		MaxTurns:             12,
+		MaxTokens:            16384,
+		MaxParallelAgents:    4,
+		ContextBudget:        120000,
+		CompactKeep:          12,
+		DaemonListenAddr:     "127.0.0.1:7331",
+		DaemonRateLimitBurst: 10,
+		BashEnabled:          true,
+		Stream:               true,
+		HookTimeout:          30 * time.Second,
+		ToolTimeout:          2 * time.Minute,
+		SystemPrompt:         defaultSystemPrompt,
+		LogLevel:             diag.LevelInfo,
 	}
 }
 
@@ -341,6 +373,8 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	applyBool(&cfg.Daemon, file.Daemon)
 	applyString(&cfg.DaemonListenAddr, file.Listen)
 	applyString(&cfg.DaemonToken, file.DaemonToken)
+	applyInt(&cfg.DaemonRateLimitPerMinute, file.DaemonRateLimitPerMinute)
+	applyInt(&cfg.DaemonRateLimitBurst, file.DaemonRateLimitBurst)
 	applyString(&cfg.RemoteURL, file.RemoteURL)
 	applyString(&cfg.RemoteToken, file.RemoteToken)
 	applyString(&cfg.RemoteSession, file.RemoteSession)
@@ -368,6 +402,9 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	if file.DaemonDir != nil {
 		raw.daemonDir = strings.TrimSpace(*file.DaemonDir)
 	}
+	if file.DaemonAuditFile != nil {
+		raw.daemonAuditFile = strings.TrimSpace(*file.DaemonAuditFile)
+	}
 	if file.MCPConfigFile != nil {
 		raw.mcpConfigFile = strings.TrimSpace(*file.MCPConfigFile)
 	}
@@ -385,6 +422,18 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	}
 	if file.DenyTools != nil {
 		raw.blockedTools = append([]string(nil), file.DenyTools...)
+	}
+	if file.DaemonAllowModes != nil {
+		raw.daemonAllowModes = append([]string(nil), file.DaemonAllowModes...)
+	}
+	if file.DaemonDenyModes != nil {
+		raw.daemonDenyModes = append([]string(nil), file.DaemonDenyModes...)
+	}
+	if file.DaemonAllowSessionPrefixes != nil {
+		raw.daemonAllowSessionPrefixes = append([]string(nil), file.DaemonAllowSessionPrefixes...)
+	}
+	if file.DaemonDenySessionPrefixes != nil {
+		raw.daemonDenySessionPrefixes = append([]string(nil), file.DaemonDenySessionPrefixes...)
 	}
 	if file.AllowBashPrefix != nil {
 		raw.bashAllow = append([]string(nil), file.AllowBashPrefix...)
@@ -448,6 +497,35 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 	}
 	if value, ok := lookup("XXX_CODE_DAEMON_DIR"); ok {
 		raw.daemonDir = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_AUDIT_FILE"); ok {
+		raw.daemonAuditFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_ALLOW_MODES"); ok {
+		raw.daemonAllowModes = parseCSV(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_DENY_MODES"); ok {
+		raw.daemonDenyModes = parseCSV(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_ALLOW_SESSION_PREFIX"); ok {
+		raw.daemonAllowSessionPrefixes = parseCSV(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_DENY_SESSION_PREFIX"); ok {
+		raw.daemonDenySessionPrefixes = parseCSV(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_RATE_LIMIT_PER_MINUTE"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid XXX_CODE_DAEMON_RATE_LIMIT_PER_MINUTE value: %w", err)
+		}
+		cfg.DaemonRateLimitPerMinute = parsed
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_RATE_LIMIT_BURST"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid XXX_CODE_DAEMON_RATE_LIMIT_BURST value: %w", err)
+		}
+		cfg.DaemonRateLimitBurst = parsed
 	}
 	if value, ok := lookup("XXX_CODE_SYSTEM_PROMPT_FILE"); ok {
 		raw.systemPromptFile = strings.TrimSpace(value)
@@ -589,6 +667,16 @@ func defaultSessionFile(workingDir, raw string) string {
 func defaultDaemonDir(workingDir, raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return filepath.Join(workingDir, ".xxx-code", "daemon")
+	}
+	return resolvePath(workingDir, raw)
+}
+
+func defaultDaemonAuditFile(workingDir, daemonDir, raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		if strings.TrimSpace(daemonDir) == "" {
+			return ""
+		}
+		return filepath.Join(daemonDir, "audit.jsonl")
 	}
 	return resolvePath(workingDir, raw)
 }

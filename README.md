@@ -43,6 +43,8 @@ x-agent/
   - `version`、GoReleaser、release workflow、config file、日志诊断
 - P1 Agent / Workflow 强化收口
   - `workflow_tasks`、失败节点/指定节点恢复、workflow artifact/result 索引、local/remote REPL 对齐
+- P2 安全与治理推进
+  - daemon audit、API mode ACL、session prefix ACL、per-client rate limiting
 
 更完整的能力说明见：
 
@@ -70,10 +72,10 @@ x-agent/
 
 ### P2 安全与治理
 
-- daemon 审计日志
-- daemon ACL
-- token 轮换与部署建议
-- 速率限制和资源上限
+- 已完成
+  - daemon audit、API mode ACL、session prefix ACL、per-client rate limiting
+- 剩余
+  - token 轮换与部署建议
 
 ### P2 生态扩展
 
@@ -84,7 +86,7 @@ x-agent/
 
 ## 推荐执行顺序
 
-1. 做审计、ACL、速率限制
+1. 补 token 轮换、TLS 反代和部署建议
 2. 扩 MCP 管理和 provider 生态
 
 ## 快速开始
