@@ -73,6 +73,17 @@ type HookConfig struct {
 	Timeout    string `json:"timeout,omitempty"`
 }
 
+type TurnStreamEvent struct {
+	Type      string          `json:"type"`
+	AgentID   string          `json:"agent_id,omitempty"`
+	AgentName string          `json:"agent_name,omitempty"`
+	ToolName  string          `json:"tool_name,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Result    *TurnResult     `json:"result,omitempty"`
+	Session   *SessionSummary `json:"session,omitempty"`
+	Error     string          `json:"error,omitempty"`
+}
+
 func NewClient(baseURL string, httpClient *http.Client) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	baseURL = strings.TrimRight(baseURL, "/")
@@ -183,6 +194,81 @@ func (c *Client) RunTurn(ctx context.Context, sessionID, prompt string, timeoutS
 		return TurnResult{}, SessionSummary{}, err
 	}
 	return response.Result, response.Session, nil
+}
+
+func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeoutSeconds int, handle func(TurnStreamEvent)) (TurnResult, SessionSummary, error) {
+	payload := map[string]any{
+		"prompt": strings.TrimSpace(prompt),
+	}
+	if timeoutSeconds > 0 {
+		payload["timeout_seconds"] = timeoutSeconds
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return TurnResult{}, SessionSummary{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/turns/stream", bytes.NewReader(data))
+	if err != nil {
+		return TurnResult{}, SessionSummary{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return TurnResult{}, SessionSummary{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if readErr != nil {
+			return TurnResult{}, SessionSummary{}, readErr
+		}
+		var remoteErr struct {
+			Error string `json:"error"`
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			_ = json.Unmarshal(body, &remoteErr)
+		}
+		message := strings.TrimSpace(remoteErr.Error)
+		if message == "" {
+			message = strings.TrimSpace(string(body))
+		}
+		return TurnResult{}, SessionSummary{}, &Error{
+			StatusCode: resp.StatusCode,
+			Message:    message,
+		}
+	}
+
+	parser := newSSEParser(resp.Body)
+	for {
+		_, raw, err := parser.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return TurnResult{}, SessionSummary{}, io.ErrUnexpectedEOF
+			}
+			return TurnResult{}, SessionSummary{}, err
+		}
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+
+		var event TurnStreamEvent
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return TurnResult{}, SessionSummary{}, err
+		}
+		if handle != nil {
+			handle(event)
+		}
+		if event.Error != "" {
+			return TurnResult{}, SessionSummary{}, errors.New(event.Error)
+		}
+		if event.Result != nil && event.Session != nil {
+			return *event.Result, *event.Session, nil
+		}
+	}
 }
 
 func (c *Client) SaveSession(ctx context.Context, sessionID string) (SessionSummary, error) {

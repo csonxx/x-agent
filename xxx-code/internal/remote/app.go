@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 )
 
 type App struct {
@@ -20,6 +21,7 @@ type App struct {
 	out       io.Writer
 	errOut    io.Writer
 	sessionID string
+	streaming bool
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
@@ -57,14 +59,11 @@ func (a *App) Run(ctx context.Context) error {
 		if strings.TrimSpace(a.config.Prompt) == "" {
 			return fmt.Errorf("remote print mode requires a prompt")
 		}
-		result, updated, err := a.client.RunTurn(ctx, a.sessionID, a.config.Prompt, 0)
+		_, updated, err := a.runTurn(ctx, a.config.Prompt)
 		if err != nil {
 			return err
 		}
 		a.sessionID = updated.ID
-		if strings.TrimSpace(result.FinalText) != "" {
-			fmt.Fprintln(a.out, result.FinalText)
-		}
 		return nil
 	}
 
@@ -110,15 +109,12 @@ func (a *App) runREPL(ctx context.Context) error {
 			continue
 		}
 
-		result, updated, err := a.client.RunTurn(ctx, a.sessionID, line, 0)
+		_, updated, err := a.runTurn(ctx, line)
 		if err != nil {
 			fmt.Fprintf(a.errOut, "error: %v\n", err)
 			continue
 		}
 		a.sessionID = updated.ID
-		if strings.TrimSpace(result.FinalText) != "" {
-			fmt.Fprintln(a.out, result.FinalText)
-		}
 	}
 }
 
@@ -297,6 +293,69 @@ func (a *App) printJSON(ctx context.Context, fn func(context.Context) (any, erro
 	}
 	fmt.Fprintln(a.out, string(data))
 	return nil
+}
+
+func (a *App) runTurn(ctx context.Context, prompt string) (TurnResult, SessionSummary, error) {
+	if !a.config.Stream {
+		result, updated, err := a.client.RunTurn(ctx, a.sessionID, prompt, 0)
+		if err != nil {
+			return TurnResult{}, SessionSummary{}, err
+		}
+		if strings.TrimSpace(result.FinalText) != "" {
+			fmt.Fprintln(a.out, result.FinalText)
+		}
+		return result, updated, nil
+	}
+
+	streamedText := false
+	result, updated, err := a.client.StreamTurn(ctx, a.sessionID, prompt, 0, func(event TurnStreamEvent) {
+		switch event.Type {
+		case string(engine.EventAssistantTextDelta):
+			if event.Text == "" {
+				return
+			}
+			streamedText = true
+			a.streaming = true
+			fmt.Fprint(a.out, event.Text)
+		case string(engine.EventAssistantTextDone):
+			if a.streaming {
+				fmt.Fprintln(a.out)
+				a.streaming = false
+			}
+		default:
+			if a.config.Verbose {
+				a.printVerboseEvent(event)
+			}
+		}
+	})
+	if a.streaming {
+		fmt.Fprintln(a.out)
+		a.streaming = false
+	}
+	if err != nil {
+		return TurnResult{}, SessionSummary{}, err
+	}
+	if !streamedText && strings.TrimSpace(result.FinalText) != "" {
+		fmt.Fprintln(a.out, result.FinalText)
+	}
+	return result, updated, nil
+}
+
+func (a *App) printVerboseEvent(event TurnStreamEvent) {
+	switch event.Type {
+	case string(engine.EventToolCall):
+		fmt.Fprintf(a.errOut, "[tool call] %s %s\n", event.ToolName, event.Text)
+	case string(engine.EventToolResult):
+		fmt.Fprintf(a.errOut, "[tool result] %s %s\n", event.ToolName, event.Text)
+	case string(engine.EventAgentSpawned), string(engine.EventAgentCompleted), string(engine.EventAgentCancelled):
+		name := event.AgentName
+		if strings.TrimSpace(name) == "" {
+			name = event.AgentID
+		}
+		fmt.Fprintf(a.errOut, "[agent] %s %s\n", event.Type, name)
+	case string(engine.EventHookError):
+		fmt.Fprintf(a.errOut, "[hook error] %s\n", event.Text)
+	}
 }
 
 func parsePromptArguments(parts []string) (map[string]string, error) {

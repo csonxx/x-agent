@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,30 @@ func (p *remoteTestProvider) CreateMessage(ctx context.Context, request engine.C
 	}
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
+	}, nil
+}
+
+type remoteStreamingTestProvider struct{}
+
+func (p *remoteStreamingTestProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	prompt := latestRemoteUserText(request.Messages)
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
+	}, nil
+}
+
+func (p *remoteStreamingTestProvider) CreateMessageStream(ctx context.Context, request engine.CompletionRequest, handle func(engine.StreamEvent)) (engine.CompletionResponse, error) {
+	_ = ctx
+	prompt := latestRemoteUserText(request.Messages)
+	for _, chunk := range []string{"reply:", prompt} {
+		handle(engine.StreamEvent{
+			Kind: engine.StreamEventTextDelta,
+			Text: chunk,
+		})
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
 	}, nil
 }
 
@@ -148,11 +173,59 @@ func TestClientCanInspectPolicyHooksAndMCPStatus(t *testing.T) {
 	}
 }
 
+func TestClientStreamTurn(t *testing.T) {
+	client, cleanup := newStreamingTestClient(t)
+	defer cleanup()
+
+	session, err := client.EnsureSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []TurnStreamEvent
+	result, updated, err := client.StreamTurn(context.Background(), session.ID, "stream me", 0, func(event TurnStreamEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "reply:stream me" {
+		t.Fatalf("unexpected final text: %+v", result)
+	}
+	if updated.ID != session.ID {
+		t.Fatalf("unexpected updated session: %+v", updated)
+	}
+
+	streamed := ""
+	for _, event := range events {
+		if event.Type == string(engine.EventAssistantTextDelta) {
+			streamed += event.Text
+		}
+	}
+	if streamed != "reply:stream me" {
+		t.Fatalf("unexpected streamed text: %q", streamed)
+	}
+}
+
 func newTestClient(t *testing.T) (*Client, func()) {
 	t.Helper()
 	cfg := newTestConfig(t)
 	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
 		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	client := NewClient(httpServer.URL, httpServer.Client())
+	return client, func() {
+		httpServer.Close()
+		_ = server.Close()
+	}
+}
+
+func newStreamingTestClient(t *testing.T) (*Client, func()) {
+	t.Helper()
+	cfg := newTestConfig(t)
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteStreamingTestProvider{}
 	})
 	httpServer := httptest.NewServer(server.Handler())
 	client := NewClient(httpServer.URL, httpServer.Client())
@@ -185,4 +258,13 @@ func newTestConfig(t *testing.T) config.Config {
 		WriteRoots:        []string{dir},
 		BashEnabled:       true,
 	}
+}
+
+func latestRemoteUserText(messages []engine.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == engine.RoleUser {
+			return strings.TrimSpace(messages[i].Text())
+		}
+	}
+	return ""
 }

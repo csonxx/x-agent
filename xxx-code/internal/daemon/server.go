@@ -53,6 +53,9 @@ type managedSession struct {
 
 	saveMu sync.Mutex
 	runMu  sync.Mutex
+	subMu  sync.Mutex
+	subSeq int
+	subs   map[int]chan engine.Event
 }
 
 type sessionSummary struct {
@@ -115,6 +118,23 @@ type sessionHookConfig struct {
 	AfterTurn  string `json:"after_turn,omitempty"`
 	AgentEvent string `json:"agent_event,omitempty"`
 	Timeout    string `json:"timeout,omitempty"`
+}
+
+type turnStreamEvent struct {
+	Type      string           `json:"type"`
+	AgentID   string           `json:"agent_id,omitempty"`
+	AgentName string           `json:"agent_name,omitempty"`
+	ToolName  string           `json:"tool_name,omitempty"`
+	Text      string           `json:"text,omitempty"`
+	Result    *streamRunResult `json:"result,omitempty"`
+	Session   *sessionSummary  `json:"session,omitempty"`
+	Error     string           `json:"error,omitempty"`
+}
+
+type streamRunResult struct {
+	FinalText string           `json:"final_text"`
+	Usage     map[string]int   `json:"usage"`
+	Messages  []engine.Message `json:"messages"`
 }
 
 func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFactory) *Server {
@@ -275,37 +295,7 @@ func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 		messages := session.messages(limit)
 		writeJSON(w, http.StatusOK, map[string]any{"messages": messages})
 	case "turns":
-		if r.Method != http.MethodPost {
-			writeMethodNotAllowed(w, http.MethodPost)
-			return
-		}
-		var req turnRequest
-		if err := decodeBody(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		runCtx := r.Context()
-		if req.TimeoutSeconds > 0 {
-			var cancel context.CancelFunc
-			runCtx, cancel = context.WithTimeout(runCtx, time.Duration(req.TimeoutSeconds)*time.Second)
-			defer cancel()
-		}
-		result, err := session.runTurn(runCtx, req.Prompt)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"result": map[string]any{
-				"final_text": result.FinalText,
-				"usage": map[string]any{
-					"input_tokens":  result.Usage.InputTokens,
-					"output_tokens": result.Usage.OutputTokens,
-				},
-				"messages": result.Messages,
-			},
-			"session": session.summary(),
-		})
+		s.handleTurnRoutes(w, r, session, parts[2:])
 	case "save":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
@@ -411,6 +401,127 @@ func (s *Server) handleAgentRoutes(w http.ResponseWriter, r *http.Request, sessi
 		writeJSON(w, http.StatusOK, map[string]any{"agent": snapshot})
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) handleTurnRoutes(w http.ResponseWriter, r *http.Request, session *managedSession, parts []string) {
+	if len(parts) == 0 {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req turnRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		runCtx := r.Context()
+		if req.TimeoutSeconds > 0 {
+			var cancel context.CancelFunc
+			runCtx, cancel = context.WithTimeout(runCtx, time.Duration(req.TimeoutSeconds)*time.Second)
+			defer cancel()
+		}
+		result, err := session.runTurn(runCtx, req.Prompt)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"result":  toStreamRunResult(result),
+			"session": session.summary(),
+		})
+		return
+	}
+	if len(parts) == 1 && parts[0] == "stream" {
+		s.handleTurnStream(w, r, session)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleTurnStream(w http.ResponseWriter, r *http.Request, session *managedSession) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, errors.New("streaming is not supported by this response writer"))
+		return
+	}
+
+	var req turnRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher.Flush()
+
+	subscription := session.subscribeEvents()
+	defer subscription.close()
+
+	type runOutcome struct {
+		result engine.RunResult
+		err    error
+	}
+	resultCh := make(chan runOutcome, 1)
+	runCtx := r.Context()
+	if req.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(req.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
+	go func() {
+		result, err := session.runTurn(runCtx, req.Prompt)
+		resultCh <- runOutcome{result: result, err: err}
+	}()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case event := <-subscription.events:
+			if err := writeSSE(w, "event", turnStreamEvent{
+				Type:      string(event.Kind),
+				AgentID:   event.AgentID,
+				AgentName: event.AgentName,
+				ToolName:  event.ToolName,
+				Text:      event.Text,
+			}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case outcome := <-resultCh:
+			if outcome.err != nil {
+				_ = writeSSE(w, "error", turnStreamEvent{
+					Type:  "error",
+					Error: outcome.err.Error(),
+				})
+				flusher.Flush()
+				return
+			}
+			_ = writeSSE(w, "result", turnStreamEvent{
+				Type:    "result",
+				Result:  toStreamRunResult(outcome.result),
+				Session: ptr(session.summary()),
+			})
+			flusher.Flush()
+			return
+		case <-keepAlive.C:
+			if err := writeSSEComment(w, "keep-alive"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
 	}
 }
 
@@ -679,6 +790,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		errOut:      s.errOut,
 		sessionFile: file,
 		loadedAt:    time.Now().UTC(),
+		subs:        make(map[int]chan engine.Event),
 	}
 	ms.workflowManager = tools.NewWorkflowManager()
 	ms.registry = engine.NewRegistry(
@@ -704,7 +816,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		SystemPrompt:        cfg.SystemPrompt,
 		MaxTokens:           cfg.MaxTokens,
 		MaxTurns:            cfg.MaxTurns,
-		StreamResponses:     false,
+		StreamResponses:     true,
 		ContextBudget:       cfg.ContextBudget,
 		CompactKeepMessages: cfg.CompactKeep,
 		WorkingDir:          cfg.WorkingDir,
@@ -912,11 +1024,57 @@ func (m *managedSession) close() error {
 }
 
 func (m *managedSession) handleEvent(event engine.Event) {
+	m.publishEvent(event)
 	switch event.Kind {
 	case engine.EventAgentSpawned, engine.EventAgentCompleted, engine.EventAgentCancelled:
 		if err := m.save(); err != nil {
 			fmt.Fprintf(m.errOut, "daemon autosave error: %v\n", err)
 		}
+	}
+}
+
+type eventSubscription struct {
+	events <-chan engine.Event
+	close  func()
+}
+
+func (m *managedSession) subscribeEvents() eventSubscription {
+	ch := make(chan engine.Event, 512)
+	m.subMu.Lock()
+	id := m.subSeq
+	m.subSeq++
+	m.subs[id] = ch
+	m.subMu.Unlock()
+	return eventSubscription{
+		events: ch,
+		close: func() {
+			m.subMu.Lock()
+			delete(m.subs, id)
+			m.subMu.Unlock()
+		},
+	}
+}
+
+func (m *managedSession) publishEvent(event engine.Event) {
+	m.subMu.Lock()
+	subscribers := make([]chan engine.Event, 0, len(m.subs))
+	for _, ch := range m.subs {
+		subscribers = append(subscribers, ch)
+	}
+	m.subMu.Unlock()
+	for _, ch := range subscribers {
+		ch <- event
+	}
+}
+
+func toStreamRunResult(result engine.RunResult) *streamRunResult {
+	return &streamRunResult{
+		FinalText: result.FinalText,
+		Usage: map[string]int{
+			"input_tokens":  result.Usage.InputTokens,
+			"output_tokens": result.Usage.OutputTokens,
+		},
+		Messages: result.Messages,
 	}
 }
 
@@ -941,6 +1099,20 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
+func writeSSE(w io.Writer, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+	return err
+}
+
+func writeSSEComment(w io.Writer, comment string) error {
+	_, err := fmt.Fprintf(w, ": %s\n\n", strings.TrimSpace(comment))
+	return err
+}
+
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]any{
 		"error": err.Error(),
@@ -958,4 +1130,8 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return "session_" + hex.EncodeToString(buf), nil
+}
+
+func ptr[T any](value T) *T {
+	return &value
 }

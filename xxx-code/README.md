@@ -155,6 +155,7 @@ go run ./cmd/xxx-code \
 - `GET /v1/sessions/{id}`
 - `GET /v1/sessions/{id}/messages?limit=20`
 - `POST /v1/sessions/{id}/turns`
+- `POST /v1/sessions/{id}/turns/stream`
 - `GET /v1/sessions/{id}/policy`
 - `GET /v1/sessions/{id}/hooks`
 - `GET /v1/sessions/{id}/mcp`
@@ -186,6 +187,14 @@ curl -s http://127.0.0.1:7331/v1/sessions/<id>/turns \
 ```
 
 这样别的服务、脚本或上层 orchestrator 就可以把 `xxx-code` 当作一个远程 agent backend 去调。
+
+如果你想让远程 turn 也边生成边输出，可以直接调用 SSE 版本：
+
+```bash
+curl -N http://127.0.0.1:7331/v1/sessions/<id>/turns/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"分析当前目录代码结构"}'
+```
 
 ## Remote Bridge 模式
 
@@ -238,6 +247,15 @@ go run ./cmd/xxx-code \
 - `:quit`
 
 这一路径下，本地 CLI 不需要直接配置 `ANTHROPIC_API_KEY`，模型调用和 session 持久化都由 daemon 负责。
+
+默认情况下，`--remote-url` 会沿用 `--stream=true`，所以远程单次执行和远程 REPL 也会边收到文本边打印；如果你更想等整轮结束后再输出，可以显式关掉：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --stream=false \
+  --print "分析当前目录代码结构"
+```
 
 ## Session 持久化与恢复
 
