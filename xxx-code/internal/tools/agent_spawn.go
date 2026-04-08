@@ -205,6 +205,8 @@ type AgentFanoutTool struct{}
 type agentFanoutInput struct {
 	Tasks          []agentTaskInput `json:"tasks"`
 	Wait           bool             `json:"wait,omitempty"`
+	MaxParallel    int              `json:"max_parallel,omitempty"`
+	FailFast       bool             `json:"fail_fast,omitempty"`
 	TimeoutSeconds int              `json:"timeout_seconds,omitempty"`
 }
 
@@ -262,6 +264,14 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 					"type":        "boolean",
 					"description": "Wait for the whole batch if true.",
 				},
+				"max_parallel": map[string]any{
+					"type":        "integer",
+					"description": "Optional workflow-local concurrency cap used when wait=true.",
+				},
+				"fail_fast": map[string]any{
+					"type":        "boolean",
+					"description": "Cancel active workflow tasks and skip pending ones when any task fails. Only applies when wait=true.",
+				},
 				"timeout_seconds": map[string]any{
 					"type":        "integer",
 					"description": "Optional timeout for the whole batch wait.",
@@ -288,7 +298,11 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 	if hasDependencies && !args.Wait {
 		return engine.ToolResult{}, fmt.Errorf("depends_on requires wait=true so xxx-code can orchestrate the workflow")
 	}
-	if hasDependencies {
+	workflowMode := hasDependencies || args.MaxParallel > 0 || args.FailFast
+	if workflowMode && !args.Wait {
+		return engine.ToolResult{}, fmt.Errorf("workflow controls require wait=true")
+	}
+	if workflowMode {
 		waitCtx := ctx
 		if args.TimeoutSeconds > 0 {
 			var cancel context.CancelFunc
@@ -296,7 +310,10 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 			defer cancel()
 		}
 
-		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan)
+		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan, fanoutExecutionOptions{
+			maxParallel: args.MaxParallel,
+			failFast:    args.FailFast,
+		})
 		if err != nil {
 			return engine.ToolResult{}, err
 		}
@@ -559,6 +576,11 @@ type fanoutWaitResult struct {
 	err      error
 }
 
+type fanoutExecutionOptions struct {
+	maxParallel int
+	failFast    bool
+}
+
 type fanoutPromptReference struct {
 	raw      string
 	taskName string
@@ -662,12 +684,28 @@ func validateFanoutPlanCycles(plan []*plannedFanoutTask) error {
 	return nil
 }
 
-func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, plan []*plannedFanoutTask) ([]fanoutTaskResult, []engine.AgentSnapshot, error) {
+func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, plan []*plannedFanoutTask, options fanoutExecutionOptions) ([]fanoutTaskResult, []engine.AgentSnapshot, error) {
 	active := make(map[string]int, len(plan))
 	resultsCh := make(chan fanoutWaitResult, len(plan))
+	failFastTriggered := false
+
+	triggerFailFast := func(taskName, status string) {
+		if !options.failFast || failFastTriggered {
+			return
+		}
+		failFastTriggered = true
+		cancelFanoutAgents(execCtx, active)
+		markPendingFanoutTasksSkipped(plan, fmt.Sprintf("skipped because fail_fast triggered by task %s with status %s", taskName, status))
+	}
 
 	launchReady := func() error {
+		if failFastTriggered {
+			return nil
+		}
 		for _, item := range plan {
+			if options.maxParallel > 0 && len(active) >= options.maxParallel {
+				return nil
+			}
 			if item.started || item.done {
 				continue
 			}
@@ -686,6 +724,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				item.done = true
 				item.result.Status = string(engine.AgentFailed)
 				item.result.Error = err.Error()
+				triggerFailFast(item.key, item.result.Status)
 				continue
 			}
 			if prompt != item.task.Prompt {
@@ -762,6 +801,9 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			current.result.Status = string(item.snapshot.Status)
 			current.result.Result = item.snapshot.Result
 			current.result.Error = item.snapshot.Error
+			if current.result.Status != string(engine.AgentIdle) {
+				triggerFailFast(current.key, current.result.Status)
+			}
 
 			if err := launchReady(); err != nil {
 				cancelFanoutAgents(execCtx, active)
@@ -821,6 +863,17 @@ func firstFailedDependency(item *plannedFanoutTask, plan []*plannedFanoutTask) (
 func cancelFanoutAgents(execCtx *engine.ExecutionContext, active map[string]int) {
 	for agentID := range active {
 		_, _ = execCtx.Runner.CancelAgent(context.Background(), agentID, true)
+	}
+}
+
+func markPendingFanoutTasksSkipped(plan []*plannedFanoutTask, reason string) {
+	for _, item := range plan {
+		if item.started || item.done {
+			continue
+		}
+		item.done = true
+		item.result.Status = "skipped"
+		item.result.Error = reason
 	}
 }
 

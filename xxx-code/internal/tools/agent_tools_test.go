@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 )
@@ -39,6 +41,67 @@ func (p *conditionalToolPromptProvider) CreateMessage(ctx context.Context, reque
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
 	}, nil
+}
+
+type gatedWorkflowProvider struct {
+	mu      sync.Mutex
+	started map[string]chan struct{}
+	release map[string]chan struct{}
+}
+
+func newGatedWorkflowProvider() *gatedWorkflowProvider {
+	return &gatedWorkflowProvider{
+		started: make(map[string]chan struct{}),
+		release: make(map[string]chan struct{}),
+	}
+}
+
+func (p *gatedWorkflowProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	prompt := latestToolUserText(request.Messages)
+	p.markStarted(prompt)
+
+	select {
+	case <-p.releaseChan(prompt):
+	case <-ctx.Done():
+		return engine.CompletionResponse{}, ctx.Err()
+	}
+
+	if strings.Contains(prompt, "fail") {
+		return engine.CompletionResponse{}, errors.New("forced failure: " + prompt)
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
+	}, nil
+}
+
+func (p *gatedWorkflowProvider) startedChan(key string) chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ch, ok := p.started[key]; ok {
+		return ch
+	}
+	ch := make(chan struct{}, 1)
+	p.started[key] = ch
+	return ch
+}
+
+func (p *gatedWorkflowProvider) releaseChan(key string) chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ch, ok := p.release[key]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	p.release[key] = ch
+	return ch
+}
+
+func (p *gatedWorkflowProvider) markStarted(prompt string) {
+	ch := p.startedChan(prompt)
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 type fanoutResponse struct {
@@ -451,6 +514,173 @@ func TestAgentFanoutToolRejectsPromptReferencesToUnknownTasks(t *testing.T) {
 	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
 	if err == nil || !strings.Contains(err.Error(), "unknown task") {
 		t.Fatalf("expected unknown task validation error, got %v", err)
+	}
+}
+
+func TestAgentFanoutToolHonorsWorkflowMaxParallel(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 3,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":         true,
+			"max_parallel": 1,
+			"tasks": []map[string]any{
+				{"name": "one", "prompt": "one"},
+				{"name": "two", "prompt": "two"},
+				{"name": "three", "prompt": "three"},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	oneStarted := provider.startedChan("one")
+	twoStarted := provider.startedChan("two")
+	threeStarted := provider.startedChan("three")
+
+	select {
+	case <-oneStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first task did not start")
+	}
+	select {
+	case <-twoStarted:
+		t.Fatal("second task started before workflow slot was released")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(provider.releaseChan("one"))
+
+	select {
+	case <-twoStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second task did not start after first completed")
+	}
+	select {
+	case <-threeStarted:
+		t.Fatal("third task started before second completed")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(provider.releaseChan("two"))
+
+	select {
+	case <-threeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("third task did not start after second completed")
+	}
+	close(provider.releaseChan("three"))
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if result.IsError {
+			t.Fatalf("expected success, got error result: %s", result.Content)
+		}
+	}
+}
+
+func TestAgentFanoutToolFailFastCancelsActiveTasks(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 3,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":         true,
+			"fail_fast":    true,
+			"max_parallel": 2,
+			"tasks": []map[string]any{
+				{"name": "fast", "prompt": "fast fail"},
+				{"name": "slow", "prompt": "slow work"},
+				{"name": "later", "prompt": "later work"},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	fastStarted := provider.startedChan("fast fail")
+	slowStarted := provider.startedChan("slow work")
+	laterStarted := provider.startedChan("later work")
+
+	select {
+	case <-fastStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast task did not start")
+	}
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow task did not start")
+	}
+
+	close(provider.releaseChan("fast fail"))
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if !result.IsError {
+			t.Fatalf("expected fail_fast workflow to return error result, got %s", result.Content)
+		}
+		var payload fanoutResponse
+		if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+			t.Fatal(err)
+		}
+		byName := mapFanoutTasks(payload.Tasks)
+		if byName["fast"].Status != "failed" {
+			t.Fatalf("expected fast task to fail, got %+v", byName["fast"])
+		}
+		if byName["slow"].Status != "cancelled" {
+			t.Fatalf("expected slow task to be cancelled, got %+v", byName["slow"])
+		}
+		if byName["later"].Status != "skipped" {
+			t.Fatalf("expected later task to be skipped, got %+v", byName["later"])
+		}
+	}
+
+	select {
+	case <-laterStarted:
+		t.Fatal("later task started despite fail_fast")
+	case <-time.After(150 * time.Millisecond):
 	}
 }
 

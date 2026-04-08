@@ -300,6 +300,8 @@ go run ./cmd/xxx-code \
 
 ```json
 {
+  "max_parallel": 2,
+  "fail_fast": true,
   "tasks": [
     {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4},
     {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8},
@@ -323,6 +325,11 @@ go run ./cmd/xxx-code \
 - `{{tasks.<name>.agent_id}}`
 
 这些引用必须同时满足两点：目标任务有 `name`，并且当前任务在 `depends_on` 里显式声明了这个依赖。执行结果里也会返回 `tasks[].resolved_prompt`，方便你调试真实下发给子 agent 的 prompt。
+
+如果你希望单个 workflow 不要把全局 agent 槽位全吃满，可以在 `agent_fanout` 里加 `max_parallel` 做局部并发上限。再往上，如果你希望任一任务失败后尽快止损，可以加 `fail_fast=true`：
+
+- 已经启动的 sibling task 会被取消，状态变成 `cancelled`
+- 还没启动的 sibling task 会被标记成 `skipped`
 
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
