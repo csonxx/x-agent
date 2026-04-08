@@ -87,6 +87,8 @@ func (c ServerConfig) Transport() string {
 	switch value {
 	case "streamable-http", "streamable_http", "streamablehttp":
 		return "http"
+	case "websocket":
+		return "ws"
 	default:
 		return value
 	}
@@ -100,22 +102,39 @@ func (c ServerConfig) CommandDir(workingDir string) (string, error) {
 }
 
 func (c ServerConfig) Endpoint() (string, error) {
+	return c.EndpointForTransport(c.Transport())
+}
+
+func (c ServerConfig) EndpointForTransport(transport string) (string, error) {
 	raw := strings.TrimSpace(c.URL)
 	if raw == "" {
-		return "", fmt.Errorf("%s MCP server url cannot be empty", c.Transport())
+		return "", fmt.Errorf("%s MCP server url cannot be empty", transport)
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("parse MCP server url %q: %w", raw, err)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("MCP server url must be an absolute http or https URL: %s", raw)
+		return "", fmt.Errorf("MCP server url must be absolute: %s", raw)
 	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https":
-		return parsed.String(), nil
+
+	switch transport {
+	case "http", "sse":
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+			return parsed.String(), nil
+		default:
+			return "", fmt.Errorf("MCP server url must use http or https: %s", raw)
+		}
+	case "ws":
+		switch strings.ToLower(parsed.Scheme) {
+		case "ws", "wss":
+			return parsed.String(), nil
+		default:
+			return "", fmt.Errorf("MCP websocket url must use ws or wss: %s", raw)
+		}
 	default:
-		return "", fmt.Errorf("MCP server url must use http or https: %s", raw)
+		return parsed.String(), nil
 	}
 }
 

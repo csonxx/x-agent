@@ -162,8 +162,8 @@ func Start(ctx context.Context, registry *engine.Registry, options Options) (*Ma
 				manager.statuses = append(manager.statuses, status)
 				continue
 			}
-		case "http", "sse":
-			endpoint, err := serverCfg.Endpoint()
+		case "http", "sse", "ws":
+			endpoint, err := serverCfg.EndpointForTransport(status.Transport)
 			if err != nil {
 				status.Status = ServerStatusFailed
 				status.Error = err.Error()
@@ -310,7 +310,7 @@ func buildTransport(ctx context.Context, name string, cfg ServerConfig, workingD
 		command.Stderr = os.Stderr
 		return &sdkmcp.CommandTransport{Command: command}, nil
 	case "http":
-		endpoint, err := cfg.Endpoint()
+		endpoint, err := cfg.EndpointForTransport("http")
 		if err != nil {
 			return nil, err
 		}
@@ -319,13 +319,22 @@ func buildTransport(ctx context.Context, name string, cfg ServerConfig, workingD
 			HTTPClient: newHTTPClient(cfg.Headers),
 		}, nil
 	case "sse":
-		endpoint, err := cfg.Endpoint()
+		endpoint, err := cfg.EndpointForTransport("sse")
 		if err != nil {
 			return nil, err
 		}
 		return &sdkmcp.SSEClientTransport{
 			Endpoint:   endpoint,
 			HTTPClient: newHTTPClient(cfg.Headers),
+		}, nil
+	case "ws":
+		endpoint, err := cfg.EndpointForTransport("ws")
+		if err != nil {
+			return nil, err
+		}
+		return &websocketClientTransport{
+			Endpoint: endpoint,
+			Header:   headerMapToHTTPHeader(cfg.Headers),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport: %s", cfg.Transport())
@@ -841,6 +850,17 @@ func newHTTPClient(headers map[string]string) *http.Client {
 			headers: headers,
 		},
 	}
+}
+
+func headerMapToHTTPHeader(headers map[string]string) http.Header {
+	if len(headers) == 0 {
+		return nil
+	}
+	values := make(http.Header, len(headers))
+	for key, value := range headers {
+		values.Set(key, value)
+	}
+	return values
 }
 
 type headerRoundTripper struct {

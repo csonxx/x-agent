@@ -10,7 +10,7 @@
 - 文件/命令权限策略
 - lifecycle hooks 扩展点
 - 本地工具调用
-- 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse）
+- 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
 - 主会话流式文本输出
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
@@ -231,7 +231,7 @@ REPL 里可以用 `:hooks` 查看当前配置。
 
 ## MCP
 
-`xxx-code` 现在会自动读取工作目录下的 `.mcp.json`，并把其中 `mcpServers` 里配置的 MCP server 动态注册成工具。目前支持三种 transport：`stdio`、`http`（streamable HTTP）和 `sse`。
+`xxx-code` 现在会自动读取工作目录下的 `.mcp.json`，并把其中 `mcpServers` 里配置的 MCP server 动态注册成工具。目前支持四种 transport：`stdio`、`http`（streamable HTTP）、`sse` 和 `ws`。
 
 兼容的配置形态：
 
@@ -252,6 +252,13 @@ REPL 里可以用 `:hooks` 查看当前配置。
     "legacy_sse": {
       "type": "sse",
       "url": "https://example.com/sse"
+    },
+    "legacy_ws": {
+      "transport": "ws",
+      "url": "wss://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${TOKEN}"
+      }
     }
   }
 }
@@ -443,7 +450,6 @@ go test ./...
 
 - 更完整的流式 TUI / 富交互界面
 - 更细粒度的权限系统
-- 远程 MCP transport 里的 `ws`
 - remote agent / bridge / daemon
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

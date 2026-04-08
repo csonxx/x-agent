@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	"github.com/gorilla/websocket"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -158,12 +160,14 @@ func TestStartLoadsToolsFromDefaultConfig(t *testing.T) {
 	}
 }
 
-func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
+func TestStartLoadsToolsFromRemoteHTTPAndSSEAndWSConfig(t *testing.T) {
 	dir := t.TempDir()
 	httpServer := newProtectedMCPHTTPServer(t, "http", "X-Test-Token", "streamable-secret")
 	defer httpServer.Close()
 	sseServer := newProtectedMCPHTTPServer(t, "sse", "X-Test-Token", "sse-secret")
 	defer sseServer.Close()
+	wsServer := newProtectedMCPWSServer(t, "X-Test-Token", "ws-secret")
+	defer wsServer.Close()
 
 	configPath := filepath.Join(dir, ".mcp.json")
 	configJSON := fmt.Sprintf(`{
@@ -177,9 +181,14 @@ func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
       "type": "sse",
       "url": %q,
       "headers": {"X-Test-Token": "sse-secret"}
+    },
+    "remote_ws": {
+      "transport": "websocket",
+      "url": %q,
+      "headers": {"X-Test-Token": "ws-secret"}
     }
   }
-}`, httpServer.URL, sseServer.URL)
+}`, httpServer.URL, sseServer.URL, wsTestURL(wsServer.URL))
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -199,8 +208,8 @@ func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
 	}()
 
 	statuses := statusesByName(manager.Statuses())
-	if len(statuses) != 2 {
-		t.Fatalf("expected 2 MCP statuses, got %d", len(statuses))
+	if len(statuses) != 3 {
+		t.Fatalf("expected 3 MCP statuses, got %d", len(statuses))
 	}
 	if statuses["remote_http"].Status != ServerStatusConnected {
 		t.Fatalf("expected remote_http to connect, got %+v", statuses["remote_http"])
@@ -208,14 +217,20 @@ func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
 	if statuses["remote_sse"].Status != ServerStatusConnected {
 		t.Fatalf("expected remote_sse to connect, got %+v", statuses["remote_sse"])
 	}
+	if statuses["remote_ws"].Status != ServerStatusConnected {
+		t.Fatalf("expected remote_ws to connect, got %+v", statuses["remote_ws"])
+	}
 	if statuses["remote_http"].URL != httpServer.URL {
 		t.Fatalf("expected normalized http URL, got %+v", statuses["remote_http"])
 	}
 	if statuses["remote_sse"].URL != sseServer.URL {
 		t.Fatalf("expected normalized sse URL, got %+v", statuses["remote_sse"])
 	}
+	if statuses["remote_ws"].URL != wsTestURL(wsServer.URL) {
+		t.Fatalf("expected normalized ws URL, got %+v", statuses["remote_ws"])
+	}
 
-	for _, name := range []string{"mcp__remote_http__echo_text", "mcp__remote_sse__echo_text"} {
+	for _, name := range []string{"mcp__remote_http__echo_text", "mcp__remote_sse__echo_text", "mcp__remote_ws__echo_text"} {
 		tool, ok := registry.Get(name)
 		if !ok {
 			t.Fatalf("expected bridged MCP tool %s to be registered", name)
@@ -238,7 +253,7 @@ func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(resourceListResult.Content, `"remote_http"`) || !strings.Contains(resourceListResult.Content, `"remote_sse"`) {
+	if !strings.Contains(resourceListResult.Content, `"remote_http"`) || !strings.Contains(resourceListResult.Content, `"remote_sse"`) || !strings.Contains(resourceListResult.Content, `"remote_ws"`) {
 		t.Fatalf("expected remote servers in resource listing, got %s", resourceListResult.Content)
 	}
 
@@ -260,13 +275,13 @@ func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(promptListResult.Content, `"remote_http"`) || !strings.Contains(promptListResult.Content, `"remote_sse"`) {
+	if !strings.Contains(promptListResult.Content, `"remote_http"`) || !strings.Contains(promptListResult.Content, `"remote_sse"`) || !strings.Contains(promptListResult.Content, `"remote_ws"`) {
 		t.Fatalf("expected remote servers in prompt listing, got %s", promptListResult.Content)
 	}
 
 	getPromptTool, _ := registry.Get("get_mcp_prompt")
 	getPromptInput, _ := json.Marshal(map[string]any{
-		"server":    "remote_sse",
+		"server":    "remote_ws",
 		"name":      "review_code",
 		"arguments": map[string]string{"topic": "transports"},
 	})
@@ -285,8 +300,8 @@ func TestStartMarksUnsupportedTransportAsFailed(t *testing.T) {
 	configJSON := `{
   "mcpServers": {
     "remote": {
-      "type": "ws",
-      "url": "https://example.com/mcp"
+      "type": "tcp",
+      "url": "tcp://example.com/mcp"
     }
   }
 }`
@@ -467,6 +482,73 @@ func newProtectedMCPHTTPServer(t *testing.T, transport, header, value string) *h
 		next.ServeHTTP(w, r)
 	})
 	return httptest.NewServer(handler)
+}
+
+func newProtectedMCPWSServer(t *testing.T, header, value string) *httptest.Server {
+	t.Helper()
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(header); got != value {
+			http.Error(w, "missing required header", http.StatusForbidden)
+			return
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+
+		transport := &testWebSocketTransport{conn: conn, done: make(chan struct{})}
+		server := newHelperServer()
+		session, err := server.Connect(context.Background(), transport, nil)
+		if err != nil {
+			t.Errorf("connect websocket session: %v", err)
+			_ = conn.Close()
+			return
+		}
+		defer session.Close()
+
+		<-transport.done
+	}))
+}
+
+type testWebSocketTransport struct {
+	conn *websocket.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func (t *testWebSocketTransport) Connect(ctx context.Context) (sdkmcp.Connection, error) {
+	_ = ctx
+	return &websocketConn{
+		conn: t.conn,
+		onClose: func() {
+			t.once.Do(func() {
+				close(t.done)
+			})
+		},
+	}, nil
+}
+
+func wsTestURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	switch parsed.Scheme {
+	case "http":
+		parsed.Scheme = "ws"
+	case "https":
+		parsed.Scheme = "wss"
+	}
+	return parsed.String()
 }
 
 func statusesByName(statuses []ServerStatus) map[string]ServerStatus {
