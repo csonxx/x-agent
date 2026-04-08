@@ -94,6 +94,12 @@ type waitRequest struct {
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }
 
+type workflowResumeRequest struct {
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	OnlyFailed     bool     `json:"only_failed,omitempty"`
+	TaskNames      []string `json:"task_names,omitempty"`
+}
+
 type sendAgentRequest struct {
 	Prompt     string `json:"prompt"`
 	Background bool   `json:"background,omitempty"`
@@ -631,12 +637,29 @@ func (s *Server) handleWorkflowRoutes(w http.ResponseWriter, r *http.Request, se
 		writeJSON(w, http.StatusOK, map[string]any{"workflow": workflow})
 		return
 	}
+	if len(parts) == 2 && parts[1] == "tasks" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		tasks, err := session.workflowManager.ListWorkflowTasks(workflowID, strings.TrimSpace(r.URL.Query().Get("status")), strings.TrimSpace(r.URL.Query().Get("name")))
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusNotFound, fmt.Errorf("workflow not found: %s", workflowID))
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+		return
+	}
 	if len(parts) == 2 && parts[1] == "resume" {
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		var req waitRequest
+		var req workflowResumeRequest
 		if err := decodeBody(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -647,7 +670,11 @@ func (s *Server) handleWorkflowRoutes(w http.ResponseWriter, r *http.Request, se
 			runCtx, cancel = context.WithTimeout(runCtx, time.Duration(req.TimeoutSeconds)*time.Second)
 			defer cancel()
 		}
-		workflow, tasks, agents, err := session.resumeWorkflow(runCtx, workflowID, req.TimeoutSeconds)
+		workflow, tasks, agents, err := session.resumeWorkflow(runCtx, workflowID, tools.ResumeWorkflowOptions{
+			TimeoutSeconds: req.TimeoutSeconds,
+			OnlyFailed:     req.OnlyFailed,
+			TaskNames:      append([]string(nil), req.TaskNames...),
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -877,6 +904,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		subs:        make(map[int]*eventSubscriber),
 	}
 	ms.workflowManager = tools.NewWorkflowManager()
+	ms.workflowManager.SetArtifactRoot(filepath.Join(cfg.WorkingDir, ".xxx-code", "artifacts", "workflows"))
 	ms.registry = engine.NewRegistry(
 		&tools.BashTool{},
 		&tools.ReadFileTool{},
@@ -892,6 +920,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		&tools.AgentListTool{},
 		&tools.WorkflowListTool{Manager: ms.workflowManager},
 		&tools.WorkflowGetTool{Manager: ms.workflowManager},
+		&tools.WorkflowTasksTool{Manager: ms.workflowManager},
 		&tools.WorkflowResumeTool{Manager: ms.workflowManager},
 	)
 
@@ -1066,7 +1095,7 @@ func (m *managedSession) waitAgent(ctx context.Context, agentID string) (engine.
 	return snapshot, m.save()
 }
 
-func (m *managedSession) resumeWorkflow(ctx context.Context, workflowID string, timeoutSeconds int) (tools.WorkflowSnapshot, []tools.FanoutTaskResultAlias, []engine.AgentSnapshot, error) {
+func (m *managedSession) resumeWorkflow(ctx context.Context, workflowID string, options tools.ResumeWorkflowOptions) (tools.WorkflowSnapshot, []tools.FanoutTaskResultAlias, []engine.AgentSnapshot, error) {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
 
@@ -1074,7 +1103,7 @@ func (m *managedSession) resumeWorkflow(ctx context.Context, workflowID string, 
 		Runner:     m.runner,
 		Session:    m.session,
 		WorkingDir: m.config.WorkingDir,
-	}, timeoutSeconds)
+	}, options)
 	if err != nil {
 		return tools.WorkflowSnapshot{}, nil, nil, err
 	}

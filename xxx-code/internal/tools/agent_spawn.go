@@ -389,6 +389,7 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 			updated, updateErr := t.Manager.UpdateWorkflow(workflowSnapshot.ID, WorkflowCompleted, "", plan, workflowOptions)
 			if updateErr == nil {
 				workflowSnapshot = updated
+				results = workflowTaskResults(workflowSnapshot.Tasks)
 			}
 		}
 		payload := map[string]any{
@@ -636,6 +637,7 @@ type fanoutTaskResult struct {
 	Status         string   `json:"status"`
 	Result         string   `json:"result,omitempty"`
 	Error          string   `json:"error,omitempty"`
+	ArtifactFile   string   `json:"artifact_file,omitempty"`
 }
 
 type plannedFanoutTask struct {

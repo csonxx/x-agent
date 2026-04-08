@@ -16,9 +16,10 @@
 - HTTP daemon、远程 bridge 与 session API
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
-- workflow 的 `list / get / resume`
+- workflow 的 `list / get / tasks / resume`
 - agent 并发上限、优先级与排队调度
 - transcript、workflow 状态持久化与 `resume`
+- workflow artifact manifest 与 task result artifact
 - `version` / build metadata
 - GoReleaser 发布配置与 GitHub release workflow
 - config file、env、flags 的优先级配置体系
@@ -56,6 +57,7 @@ xxx-code/
 - `agent_list`
 - `workflow_list`
 - `workflow_get`
+- `workflow_tasks`
 - `workflow_resume`
 - `mcp__<server>__<tool>` 动态 MCP tools
 - `list_mcp_resources`
@@ -150,10 +152,14 @@ REPL 内支持：
 - `:agents`
 - `:workflows`
 - `:workflow <workflow-id>`
-- `:workflow-resume <workflow-id>`
+- `:workflow-tasks <workflow-id> [status|name=<task>]`
+- `:workflow-resume <workflow-id> [failed|task...]`
 - `:mcp`
 - `:mcp-resources [server]`
+- `:mcp-resource-templates [server]`
 - `:mcp-prompts [server]`
+- `:mcp-read <server> <uri>`
+- `:mcp-prompt <server> <name> [key=value ...]`
 - `:wait <agent-id>`
 - `:wait-all [agent-id ...]`
 - `:send <agent-id> <prompt>`
@@ -248,6 +254,7 @@ go run ./cmd/xxx-code \
 - `POST /v1/sessions/{id}/agents/{agent_id}/wait`
 - `GET /v1/sessions/{id}/workflows`
 - `GET /v1/sessions/{id}/workflows/{workflow_id}`
+- `GET /v1/sessions/{id}/workflows/{workflow_id}/tasks?status=failed`
 - `POST /v1/sessions/{id}/workflows/{workflow_id}/resume`
 
 例如新建一个远程 session：
@@ -394,7 +401,8 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:cancel <agent-id>`
 - `:workflows`
 - `:workflow <id>`
-- `:workflow-resume <id>`
+- `:workflow-tasks <id> [status|name=<task>]`
+- `:workflow-resume <id> [failed|task...]`
 - `:save`
 - `:quit`
 
@@ -437,14 +445,28 @@ go run ./cmd/xxx-code --resume
 ```text
 :workflows
 :workflow <workflow-id>
-:workflow-resume <workflow-id>
+:workflow-tasks <workflow-id> failed
+:workflow-resume <workflow-id> failed
+:workflow-resume <workflow-id> planner writer
 ```
 
 或者对应的工具：
 
 - `workflow_list`
 - `workflow_get`
+- `workflow_tasks`
 - `workflow_resume`
+
+如果配置了默认 artifact 目录，workflow 每次状态变化还会额外写出：
+
+```text
+.xxx-code/artifacts/workflows/<workflow-id>/
+  manifest.json
+  01_<task-name>.json
+  02_<task-name>.json
+```
+
+`manifest.json` 里会包含 workflow summary 和完整 task 列表；每个 task artifact 会记录当次 workflow 状态、task snapshot、错误信息和生成时间，方便后续排障或作为更高层 orchestrator 的结果索引。
 
 ## 自动上下文压缩
 
@@ -691,6 +713,35 @@ go run ./cmd/xxx-code \
 如果你还希望高优先级任务能“插队”，可以加 `preempt_lower_priority=true`。这时高优先级 task 在被 `max_parallel` 或 `resource_limits` 挡住时，会尝试取消已经运行中的更低优先级 task，先让高优先级任务跑完；被抢占的低优先级 task 后面会重新排回去继续执行。执行结果里的 `tasks[].preemptions` 会记录它被抢占了多少次。
 
 带编排控制的 `agent_fanout` 现在还会返回一个 `workflow.id`。这个 workflow 会跟着 session 一起保存，所以如果中途退出，你可以在 `--resume` 之后继续查看或恢复，而不用手工重新拼整张 DAG。
+
+如果你只想重跑失败节点，可以在 `workflow_resume` 里传 `only_failed=true`；如果你已经知道要从哪几个节点开始，也可以传 `task_names`。runtime 会自动把这些节点的 downstream dependents 一起重置成可运行状态：
+
+```json
+{
+  "workflow_id": "workflow_123",
+  "only_failed": true
+}
+```
+
+或者：
+
+```json
+{
+  "workflow_id": "workflow_123",
+  "task_names": ["planner", "writer"]
+}
+```
+
+配合 `workflow_tasks` 的状态过滤：
+
+```json
+{
+  "workflow_id": "workflow_123",
+  "status": "failed"
+}
+```
+
+上层 orchestrator 就可以先查出失败节点，再选择性地恢复，而不需要整张 DAG 从头重跑。
 
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 

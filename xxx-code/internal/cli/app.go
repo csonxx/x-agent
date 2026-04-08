@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		errOut:          errOut,
 		logger:          diag.New(errOut, cfg.LogLevel),
 	}
+	app.workflowManager.SetArtifactRoot(filepath.Join(cfg.WorkingDir, ".xxx-code", "artifacts", "workflows"))
 
 	registry := engine.NewRegistry(
 		&tools.BashTool{},
@@ -63,6 +65,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		&tools.AgentListTool{},
 		&tools.WorkflowListTool{Manager: app.workflowManager},
 		&tools.WorkflowGetTool{Manager: app.workflowManager},
+		&tools.WorkflowTasksTool{Manager: app.workflowManager},
 		&tools.WorkflowResumeTool{Manager: app.workflowManager},
 	)
 	app.registry = registry
@@ -198,10 +201,14 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":agents                   list spawned agents")
 		fmt.Fprintln(a.out, ":workflows                list persisted workflow summaries")
 		fmt.Fprintln(a.out, ":workflow <workflow-id>   print one persisted workflow snapshot")
-		fmt.Fprintln(a.out, ":workflow-resume <id>     resume an interrupted workflow")
+		fmt.Fprintln(a.out, ":workflow-tasks <id> [status|name=<task>] list persisted workflow tasks")
+		fmt.Fprintln(a.out, ":workflow-resume <id> [failed|task...]    resume a workflow from failed or selected tasks")
 		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
 		fmt.Fprintln(a.out, ":mcp-resources [server]   list MCP resources")
+		fmt.Fprintln(a.out, ":mcp-resource-templates [server] list MCP resource templates")
 		fmt.Fprintln(a.out, ":mcp-prompts [server]     list MCP prompts")
+		fmt.Fprintln(a.out, ":mcp-read <server> <uri>  read one MCP resource")
+		fmt.Fprintln(a.out, ":mcp-prompt <server> <name> [k=v ...] fetch one MCP prompt")
 		fmt.Fprintln(a.out, ":wait <agent-id>          wait for an agent and print its snapshot")
 		fmt.Fprintln(a.out, ":wait-all [agent-id ...]  wait for a batch of agents or every known agent")
 		fmt.Fprintln(a.out, ":send <agent-id> <prompt> continue an existing agent")
@@ -235,10 +242,41 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		data, _ := json.MarshalIndent(snapshot, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
+	case ":workflow-tasks":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :workflow-tasks <workflow-id> [status|name=<task>]")
+			return false, nil
+		}
+		statusFilter := ""
+		nameFilter := ""
+		if len(fields) > 2 {
+			value := strings.TrimSpace(fields[2])
+			if strings.HasPrefix(strings.ToLower(value), "name=") {
+				nameFilter = strings.TrimSpace(strings.TrimPrefix(value, "name="))
+			} else {
+				statusFilter = value
+			}
+		}
+		tasks, err := a.workflowManager.ListWorkflowTasks(fields[1], statusFilter, nameFilter)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(tasks, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
 	case ":workflow-resume":
 		if len(fields) < 2 {
-			fmt.Fprintln(a.errOut, "usage: :workflow-resume <workflow-id>")
+			fmt.Fprintln(a.errOut, "usage: :workflow-resume <workflow-id> [failed|task...]")
 			return false, nil
+		}
+		options := tools.ResumeWorkflowOptions{}
+		if len(fields) > 2 {
+			if strings.EqualFold(fields[2], "failed") {
+				options.OnlyFailed = true
+			} else {
+				options.TaskNames = append([]string(nil), fields[2:]...)
+			}
 		}
 		resumeCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 		defer cancel()
@@ -246,7 +284,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 			Runner:     a.runner,
 			Session:    a.session,
 			WorkingDir: a.config.WorkingDir,
-		}, 0)
+		}, options)
 		if err != nil {
 			fmt.Fprintf(a.errOut, "error: %v\n", err)
 			return false, nil
@@ -283,6 +321,23 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		data, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
+	case ":mcp-resource-templates":
+		if a.mcpManager == nil {
+			fmt.Fprintln(a.errOut, "error: MCP is not configured")
+			return false, nil
+		}
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		result, err := a.mcpManager.ListResourceTemplates(ctx, server)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
 	case ":mcp-prompts":
 		if a.mcpManager == nil {
 			fmt.Fprintln(a.errOut, "error: MCP is not configured")
@@ -293,6 +348,45 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 			server = fields[1]
 		}
 		result, err := a.mcpManager.ListPrompts(ctx, server)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-read":
+		if a.mcpManager == nil {
+			fmt.Fprintln(a.errOut, "error: MCP is not configured")
+			return false, nil
+		}
+		if len(fields) < 3 {
+			fmt.Fprintln(a.errOut, "usage: :mcp-read <server> <uri>")
+			return false, nil
+		}
+		result, err := a.mcpManager.ReadResource(ctx, fields[1], fields[2])
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-prompt":
+		if a.mcpManager == nil {
+			fmt.Fprintln(a.errOut, "error: MCP is not configured")
+			return false, nil
+		}
+		if len(fields) < 3 {
+			fmt.Fprintln(a.errOut, "usage: :mcp-prompt <server> <name> [key=value ...]")
+			return false, nil
+		}
+		arguments, err := parseLocalPromptArguments(fields[3:])
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		result, err := a.mcpManager.GetPrompt(ctx, fields[1], fields[2], arguments)
 		if err != nil {
 			fmt.Fprintf(a.errOut, "error: %v\n", err)
 			return false, nil
@@ -576,4 +670,19 @@ func (a *App) runPrompt(ctx context.Context, prompt string) (engine.RunResult, e
 		return result, err
 	}
 	return result, a.saveSession()
+}
+
+func parseLocalPromptArguments(parts []string) (map[string]string, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	values := make(map[string]string, len(parts))
+	for _, part := range parts {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, fmt.Errorf("invalid prompt argument %q: expected key=value", part)
+		}
+		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return values, nil
 }

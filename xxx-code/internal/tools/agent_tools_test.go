@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -155,6 +157,7 @@ type fanoutTaskPayload struct {
 	AgentID        string   `json:"agent_id"`
 	Result         string   `json:"result"`
 	Error          string   `json:"error"`
+	ArtifactFile   string   `json:"artifact_file"`
 }
 
 func TestAgentFanoutToolWaitsForBatch(t *testing.T) {
@@ -1401,6 +1404,180 @@ func TestWorkflowResumeToolResumesInterruptedWorkflow(t *testing.T) {
 	}
 	if byName["one"].Attempts != 2 {
 		t.Fatalf("expected resumed first task to preserve and increment attempts, got %+v", byName["one"])
+	}
+}
+
+func TestWorkflowResumeToolCanRerunOnlyFailedTasksAndWriteArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewWorkflowManager()
+	manager.SetArtifactRoot(filepath.Join(dir, "artifacts"))
+
+	failRunner := engine.NewRunner(&conditionalToolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+	fanoutTool := &AgentFanoutTool{Manager: manager}
+	execCtx := &engine.ExecutionContext{
+		Runner:     failRunner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "one", "prompt": "fail one"},
+			{"name": "two", "prompt": "two follows one", "depends_on": []string{"one"}},
+		},
+	})
+	result, err := fanoutTool.Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected initial workflow failure payload, got %s", result.Content)
+	}
+
+	var initial fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &initial); err != nil {
+		t.Fatal(err)
+	}
+	initialByName := mapFanoutTasks(initial.Tasks)
+	if initialByName["one"].Status != string(engine.AgentFailed) || initialByName["two"].Status != "skipped" {
+		t.Fatalf("unexpected initial workflow task status: %+v", initialByName)
+	}
+	if initialByName["one"].ArtifactFile == "" || initialByName["two"].ArtifactFile == "" {
+		t.Fatalf("expected artifact files for persisted workflow tasks, got %+v", initialByName)
+	}
+	if _, err := os.Stat(initialByName["one"].ArtifactFile); err != nil {
+		t.Fatalf("expected task artifact file to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "artifacts", initial.Workflow.ID, "manifest.json")); err != nil {
+		t.Fatalf("expected workflow manifest to exist: %v", err)
+	}
+
+	tasksTool := &WorkflowTasksTool{Manager: manager}
+	taskQuery, _ := json.Marshal(map[string]any{
+		"workflow_id": initial.Workflow.ID,
+		"status":      "failed",
+	})
+	taskResult, err := tasksTool.Call(context.Background(), execCtx, taskQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(taskResult.Content, `"one"`) {
+		t.Fatalf("expected filtered workflow task payload, got %s", taskResult.Content)
+	}
+
+	resumeRunner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+	resumeTool := &WorkflowResumeTool{Manager: manager}
+	resumeInput, _ := json.Marshal(map[string]any{
+		"workflow_id": initial.Workflow.ID,
+		"only_failed": true,
+	})
+	resumed, err := resumeTool.Call(context.Background(), &engine.ExecutionContext{
+		Runner:     resumeRunner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}, resumeInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.IsError {
+		t.Fatalf("expected failed-only resume to succeed, got %s", resumed.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(resumed.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	byName := mapFanoutTasks(payload.Tasks)
+	if byName["one"].Status != string(engine.AgentIdle) || byName["two"].Status != string(engine.AgentIdle) {
+		t.Fatalf("expected failed tasks and downstream dependents to recover, got %+v", byName)
+	}
+	if byName["one"].Attempts != 2 {
+		t.Fatalf("expected failed task to rerun, got %+v", byName["one"])
+	}
+	if byName["two"].Attempts != 1 {
+		t.Fatalf("expected skipped dependent to run once after resume, got %+v", byName["two"])
+	}
+}
+
+func TestWorkflowResumeToolCanRerunSelectedTasksOnCompletedWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewWorkflowManager()
+
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+	fanoutTool := &AgentFanoutTool{Manager: manager}
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait":         true,
+		"max_parallel": 1,
+		"tasks": []map[string]any{
+			{"name": "one", "prompt": "task one"},
+			{"name": "two", "prompt": "task two"},
+		},
+	})
+	result, err := fanoutTool.Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var initial fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &initial); err != nil {
+		t.Fatal(err)
+	}
+	if initial.Workflow.Status != WorkflowCompleted {
+		t.Fatalf("expected completed workflow, got %+v", initial.Workflow)
+	}
+
+	resumeTool := &WorkflowResumeTool{Manager: manager}
+	resumeInput, _ := json.Marshal(map[string]any{
+		"workflow_id": initial.Workflow.ID,
+		"task_names":  []string{"one"},
+	})
+	resumed, err := resumeTool.Call(context.Background(), &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}, resumeInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.IsError {
+		t.Fatalf("expected selective rerun to succeed, got %s", resumed.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(resumed.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	byName := mapFanoutTasks(payload.Tasks)
+	if byName["one"].Attempts != 2 {
+		t.Fatalf("expected selected task to rerun, got %+v", byName["one"])
+	}
+	if byName["two"].Attempts != 1 {
+		t.Fatalf("expected unselected task to keep prior attempt count, got %+v", byName["two"])
 	}
 }
 

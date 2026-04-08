@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
 	"github.com/caowenhua/x-agent/xxx-code/internal/daemon"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
 type remoteTestProvider struct{}
@@ -32,6 +34,8 @@ func (p *remoteTestProvider) CreateMessage(ctx context.Context, request engine.C
 }
 
 type remoteStreamingTestProvider struct{}
+
+type remoteWorkflowProvider struct{}
 
 type remoteBlockingProvider struct{}
 
@@ -54,6 +58,40 @@ func (p *remoteStreamingTestProvider) CreateMessageStream(ctx context.Context, r
 	}
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
+	}, nil
+}
+
+func (p *remoteWorkflowProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+
+	if toolResult, ok := latestRemoteToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "tool-result:"+toolResult),
+		}, nil
+	}
+
+	if prompt := latestRemoteUserText(request.Messages); prompt == "fanout work" {
+		input, _ := json.Marshal(map[string]any{
+			"wait":         true,
+			"max_parallel": 1,
+			"tasks": []map[string]any{
+				{"name": "one", "prompt": "task one"},
+				{"name": "two", "prompt": "task two"},
+			},
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "fanout"},
+					{Type: engine.BlockToolUse, ID: "toolu_fanout", Name: "agent_fanout", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestRemoteUserText(request.Messages)),
 	}, nil
 }
 
@@ -253,6 +291,63 @@ func TestClientCanUseRemoteToken(t *testing.T) {
 	}
 }
 
+func TestClientCanQueryWorkflowTasksAndResumeSelectedRemoteTask(t *testing.T) {
+	cfg := newTestConfig(t)
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteWorkflowProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "workflow-remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), session.ID, "fanout work", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	workflows, err := client.ListWorkflows(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("expected one workflow, got %d", len(workflows))
+	}
+
+	tasks, err := client.ListWorkflowTasks(context.Background(), session.ID, workflows[0].ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected two workflow tasks, got %d", len(tasks))
+	}
+
+	resumed, err := client.ResumeWorkflow(context.Background(), session.ID, workflows[0].ID, WorkflowResumeOptions{
+		TaskNames: []string{"one"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Workflow.Status != tools.WorkflowCompleted {
+		t.Fatalf("expected completed workflow after selective resume, got %+v", resumed.Workflow)
+	}
+	byName := map[string]tools.FanoutTaskResultAlias{}
+	for _, task := range resumed.Tasks {
+		byName[task.Name] = task
+	}
+	if byName["one"].Attempts != 2 {
+		t.Fatalf("expected selected task to rerun remotely, got %+v", byName["one"])
+	}
+	if byName["two"].Attempts != 1 {
+		t.Fatalf("expected unselected task to keep prior attempts, got %+v", byName["two"])
+	}
+}
+
 func TestClientStreamTurnReturnsStructuredTimeoutError(t *testing.T) {
 	cfg := newTestConfig(t)
 	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
@@ -379,4 +474,15 @@ func latestRemoteUserText(messages []engine.Message) string {
 		}
 	}
 	return ""
+}
+
+func latestRemoteToolResult(messages []engine.Message) (string, bool) {
+	for i := len(messages) - 1; i >= 0; i-- {
+		for _, block := range messages[i].Content {
+			if block.Type == engine.BlockToolResult {
+				return strings.TrimSpace(block.Result), true
+			}
+		}
+	}
+	return "", false
 }

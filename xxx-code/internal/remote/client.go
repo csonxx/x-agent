@@ -62,6 +62,12 @@ type WorkflowResumeResult struct {
 	Agents   []engine.AgentSnapshot        `json:"agents"`
 }
 
+type WorkflowResumeOptions struct {
+	TimeoutSeconds int
+	OnlyFailed     bool
+	TaskNames      []string
+}
+
 type MCPSummary struct {
 	ConfigPath  string                    `json:"config_path,omitempty"`
 	ServerCount int                       `json:"server_count"`
@@ -459,11 +465,38 @@ func (c *Client) GetWorkflow(ctx context.Context, sessionID, workflowID string) 
 	return response.Workflow, nil
 }
 
-func (c *Client) ResumeWorkflow(ctx context.Context, sessionID, workflowID string, timeoutSeconds int) (WorkflowResumeResult, error) {
+func (c *Client) ListWorkflowTasks(ctx context.Context, sessionID, workflowID, statusFilter, nameFilter string) ([]tools.WorkflowTaskState, error) {
+	var response struct {
+		Tasks []tools.WorkflowTaskState `json:"tasks"`
+	}
+	path := "/v1/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/workflows/" + url.PathEscape(strings.TrimSpace(workflowID)) + "/tasks"
+	query := url.Values{}
+	if strings.TrimSpace(statusFilter) != "" {
+		query.Set("status", strings.TrimSpace(statusFilter))
+	}
+	if strings.TrimSpace(nameFilter) != "" {
+		query.Set("name", strings.TrimSpace(nameFilter))
+	}
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Tasks, nil
+}
+
+func (c *Client) ResumeWorkflow(ctx context.Context, sessionID, workflowID string, options WorkflowResumeOptions) (WorkflowResumeResult, error) {
 	var response WorkflowResumeResult
 	payload := map[string]any{}
-	if timeoutSeconds > 0 {
-		payload["timeout_seconds"] = timeoutSeconds
+	if options.TimeoutSeconds > 0 {
+		payload["timeout_seconds"] = options.TimeoutSeconds
+	}
+	if options.OnlyFailed {
+		payload["only_failed"] = true
+	}
+	if len(options.TaskNames) > 0 {
+		payload["task_names"] = append([]string(nil), options.TaskNames...)
 	}
 	path := "/v1/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/workflows/" + url.PathEscape(strings.TrimSpace(workflowID)) + "/resume"
 	if err := c.doJSON(ctx, http.MethodPost, path, payload, &response); err != nil {

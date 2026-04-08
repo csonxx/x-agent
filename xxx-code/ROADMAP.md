@@ -46,15 +46,17 @@
 
 ## P1 Agent / Workflow 强化
 
-- [ ] workflow 查询与可视化增强
-  - 更强的汇总、过滤、失败诊断
-- [ ] 更细粒度恢复
-  - 单 task 重跑
-  - 从失败节点继续
-- [ ] remote / local 命令面对齐
-  - 继续收敛 REPL / TUI 能力差异
-- [ ] workflow artifact 约定
-  - 任务输出、结果索引、后续编排消费
+- [x] workflow 查询与可视化增强
+  - 已补 workflow summary 扩展统计、`workflow_tasks`、状态/名称过滤
+- [x] 更细粒度恢复
+  - 已补 `workflow_resume.only_failed`
+  - 已补 `workflow_resume.task_names`
+  - 会自动把 downstream dependents 一起纳入恢复
+- [x] remote / local 命令面对齐
+  - 已对齐本地/远程 REPL 的 workflow 查询、选择性恢复与 MCP 查询命令
+- [x] workflow artifact 约定
+  - 已补 `.xxx-code/artifacts/workflows/<workflow-id>/manifest.json`
+  - 已补 task 级 artifact/result 索引，便于排障与上层编排消费
 
 ## P2 安全与治理
 
@@ -83,17 +85,16 @@
 1. 补端到端集成测试与基础 CI
 2. 做并发 / 恢复压测与 daemon 生命周期收敛
 3. 完善版本化、发布和配置体系
-4. 强化 workflow 恢复、结果管理与查询能力
-5. 做审计、ACL、速率限制
-6. 扩 MCP 管理与 provider 生态
+4. 做审计、ACL、速率限制
+5. 扩 MCP 管理与 provider 生态
 
 ## 当前阶段
 
 当前默认推进顺序：
 
-1. 先把测试与 CI 补厚，给后续迭代兜底
-2. 再继续做 daemon / workflow 的稳定性和治理能力
-3. 最后做发布与生态层扩展
+1. 优先进入 P2 安全与治理
+2. 再继续做 MCP / provider / hooks 这一层生态扩展
+3. 保持测试和发布链路持续跟进
 
 ## 完成标准
 

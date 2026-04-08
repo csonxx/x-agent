@@ -41,6 +41,8 @@ x-agent/
   - daemon 生命周期、结构化错误、并发/恢复回归、`go test -race ./...`
 - P1 发布能力收口
   - `version`、GoReleaser、release workflow、config file、日志诊断
+- P1 Agent / Workflow 强化收口
+  - `workflow_tasks`、失败节点/指定节点恢复、workflow artifact/result 索引、local/remote REPL 对齐
 
 更完整的能力说明见：
 
@@ -66,13 +68,6 @@ x-agent/
   - 配置文件与环境变量优先级
   - 日志与诊断能力
 
-### P1 Agent / Workflow 强化
-
-- 更强的 workflow 查询和失败诊断
-- 单 task 重跑、从失败节点继续
-- 继续收敛 remote / local 命令面对齐
-- 建立 workflow artifact/result 约定
-
 ### P2 安全与治理
 
 - daemon 审计日志
@@ -89,11 +84,8 @@ x-agent/
 
 ## 推荐执行顺序
 
-1. 继续补测试、压测和 daemon 稳定性
-2. 完善版本化、发布和配置体系
-3. 增强 workflow 恢复、结果管理和查询能力
-4. 做审计、ACL、速率限制
-5. 扩 MCP 管理和 provider 生态
+1. 做审计、ACL、速率限制
+2. 扩 MCP 管理和 provider 生态
 
 ## 快速开始
 

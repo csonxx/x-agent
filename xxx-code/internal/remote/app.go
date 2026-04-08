@@ -150,7 +150,8 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":cancel <agent-id>        cancel a remote agent and descendants")
 		fmt.Fprintln(a.out, ":workflows                list remote workflows")
 		fmt.Fprintln(a.out, ":workflow <id>            print one remote workflow snapshot")
-		fmt.Fprintln(a.out, ":workflow-resume <id>     resume an interrupted remote workflow")
+		fmt.Fprintln(a.out, ":workflow-tasks <id> [status|name=<task>] list remote workflow tasks")
+		fmt.Fprintln(a.out, ":workflow-resume <id> [failed|task...]    resume remote workflow from failed or selected tasks")
 		fmt.Fprintln(a.out, ":save                     persist the current remote session")
 		return false, nil
 	case ":session":
@@ -270,15 +271,42 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			return a.client.GetWorkflow(ctx, a.sessionID, fields[1])
 		})
+	case ":workflow-tasks":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :workflow-tasks <workflow-id> [status|name=<task>]")
+			return false, nil
+		}
+		statusFilter := ""
+		nameFilter := ""
+		if len(fields) > 2 {
+			value := strings.TrimSpace(fields[2])
+			if strings.HasPrefix(strings.ToLower(value), "name=") {
+				nameFilter = strings.TrimSpace(strings.TrimPrefix(value, "name="))
+			} else {
+				statusFilter = value
+			}
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ListWorkflowTasks(ctx, a.sessionID, fields[1], statusFilter, nameFilter)
+		})
 	case ":workflow-resume":
 		if len(fields) < 2 {
-			fmt.Fprintln(a.errOut, "usage: :workflow-resume <workflow-id>")
+			fmt.Fprintln(a.errOut, "usage: :workflow-resume <workflow-id> [failed|task...]")
 			return false, nil
+		}
+		options := WorkflowResumeOptions{}
+		if len(fields) > 2 {
+			if strings.EqualFold(fields[2], "failed") {
+				options.OnlyFailed = true
+			} else {
+				options.TaskNames = append([]string(nil), fields[2:]...)
+			}
 		}
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			resumeCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 			defer cancel()
-			return a.client.ResumeWorkflow(resumeCtx, a.sessionID, fields[1], 1800)
+			options.TimeoutSeconds = 1800
+			return a.client.ResumeWorkflow(resumeCtx, a.sessionID, fields[1], options)
 		})
 	case ":save":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
