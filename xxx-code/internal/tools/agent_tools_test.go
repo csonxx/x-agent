@@ -104,3 +104,46 @@ func TestAgentWaitToolCanWaitAll(t *testing.T) {
 		t.Fatalf("expected agents field, got %s", result.Content)
 	}
 }
+
+func TestAgentSpawnToolPropagatesPriority(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 1,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"name":       "priority-worker",
+		"prompt":     "task priority",
+		"priority":   7,
+		"background": true,
+	})
+
+	result, err := (&AgentSpawnTool{}).Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, `"priority": 7`) {
+		t.Fatalf("expected priority in response, got %s", result.Content)
+	}
+
+	snapshots := runner.ListAgents()
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(snapshots))
+	}
+	if snapshots[0].Priority != 7 {
+		t.Fatalf("expected priority 7, got %+v", snapshots[0])
+	}
+}

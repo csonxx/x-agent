@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +14,14 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Type    string            `json:"type,omitempty"`
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Cwd     string            `json:"cwd,omitempty"`
+	Type          string            `json:"type,omitempty"`
+	TransportType string            `json:"transport,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Command       string            `json:"command,omitempty"`
+	Args          []string          `json:"args,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	Cwd           string            `json:"cwd,omitempty"`
 }
 
 type Options struct {
@@ -72,10 +76,20 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func (c ServerConfig) Transport() string {
-	if strings.TrimSpace(c.Type) == "" {
+	value := strings.TrimSpace(c.TransportType)
+	if value == "" {
+		value = strings.TrimSpace(c.Type)
+	}
+	if value == "" {
 		return "stdio"
 	}
-	return strings.TrimSpace(c.Type)
+	value = strings.ToLower(value)
+	switch value {
+	case "streamable-http", "streamable_http", "streamablehttp":
+		return "http"
+	default:
+		return value
+	}
 }
 
 func (c ServerConfig) CommandDir(workingDir string) (string, error) {
@@ -83,6 +97,26 @@ func (c ServerConfig) CommandDir(workingDir string) (string, error) {
 		return workingDir, nil
 	}
 	return expandPath(workingDir, c.Cwd)
+}
+
+func (c ServerConfig) Endpoint() (string, error) {
+	raw := strings.TrimSpace(c.URL)
+	if raw == "" {
+		return "", fmt.Errorf("%s MCP server url cannot be empty", c.Transport())
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse MCP server url %q: %w", raw, err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("MCP server url must be an absolute http or https URL: %s", raw)
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		return parsed.String(), nil
+	default:
+		return "", fmt.Errorf("MCP server url must use http or https: %s", raw)
+	}
 }
 
 func expandPath(base, value string) (string, error) {

@@ -199,6 +199,65 @@ func TestRunnerCanCancelAgent(t *testing.T) {
 	}
 }
 
+func TestRunnerCanCancelQueuedAgent(t *testing.T) {
+	provider := newGatedProvider()
+	runner := NewRunner(provider, NewRegistry(), RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		MaxParallelAgents: 1,
+	})
+
+	slowStarted := provider.channelFor(provider.started, "slow task")
+	slowRelease := provider.channelFor(provider.release, "slow task")
+	queuedStarted := provider.channelFor(provider.started, "queued task")
+
+	slow, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "slow",
+		Prompt:     "slow task",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow agent did not start")
+	}
+
+	queued, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "queued",
+		Prompt:     "queued task",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Status != AgentQueued {
+		t.Fatalf("expected queued status, got %s", queued.Status)
+	}
+
+	cancelled, err := runner.CancelAgent(context.Background(), queued.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != AgentCancelled {
+		t.Fatalf("expected cancelled status, got %s", cancelled.Status)
+	}
+
+	close(slowRelease)
+	if _, err := runner.WaitAgent(context.Background(), slow.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-queuedStarted:
+		t.Fatal("queued agent started after it was cancelled")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestRunnerCompactsLargeSession(t *testing.T) {
 	runner := NewRunner(&promptProvider{}, NewRegistry(), RunnerConfig{
 		Model:               "test-model",
@@ -442,6 +501,104 @@ func TestRunnerQueuesAgentsWhenConcurrencyIsLimited(t *testing.T) {
 	}
 	if fastDone.Status != AgentIdle {
 		t.Fatalf("expected idle fast agent, got %s", fastDone.Status)
+	}
+}
+
+func TestRunnerPrefersHigherPriorityAgentsWhenQueueing(t *testing.T) {
+	provider := newGatedProvider()
+	runner := NewRunner(provider, NewRegistry(), RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		MaxParallelAgents: 1,
+	})
+
+	slowStarted := provider.channelFor(provider.started, "slow task")
+	slowRelease := provider.channelFor(provider.release, "slow task")
+	lowStarted := provider.channelFor(provider.started, "low task")
+	lowRelease := provider.channelFor(provider.release, "low task")
+	highStarted := provider.channelFor(provider.started, "high task")
+	highRelease := provider.channelFor(provider.release, "high task")
+
+	slow, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "slow",
+		Prompt:     "slow task",
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slow.Status != AgentRunning {
+		t.Fatalf("expected running slow agent, got %s", slow.Status)
+	}
+
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow agent did not start")
+	}
+
+	low, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "low",
+		Prompt:     "low task",
+		Priority:   1,
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := runner.SpawnAgent(nil, SpawnRequest{
+		Name:       "high",
+		Prompt:     "high task",
+		Priority:   10,
+		Background: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if low.Status != AgentQueued || high.Status != AgentQueued {
+		t.Fatalf("expected queued agents, got low=%s high=%s", low.Status, high.Status)
+	}
+
+	close(slowRelease)
+	if _, err := runner.WaitAgent(context.Background(), slow.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-highStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("high-priority agent did not start after slot release")
+	}
+
+	select {
+	case <-lowStarted:
+		t.Fatal("low-priority agent started before higher-priority work completed")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(highRelease)
+	highDone, err := runner.WaitAgent(context.Background(), high.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if highDone.Status != AgentIdle {
+		t.Fatalf("expected idle high-priority agent, got %s", highDone.Status)
+	}
+
+	select {
+	case <-lowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("low-priority agent did not start after higher-priority work completed")
+	}
+
+	close(lowRelease)
+	lowDone, err := runner.WaitAgent(context.Background(), low.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lowDone.Status != AgentIdle {
+		t.Fatalf("expected idle low-priority agent, got %s", lowDone.Status)
 	}
 }
 

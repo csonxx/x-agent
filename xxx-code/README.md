@@ -10,12 +10,12 @@
 - 文件/命令权限策略
 - lifecycle hooks 扩展点
 - 本地工具调用
-- 本地 stdio MCP 客户端与动态工具桥接
+- 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse）
 - 主会话流式文本输出
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
-- agent 并发上限与排队调度
+- agent 并发上限、优先级与排队调度
 - transcript 持久化与 `resume`
 
 ## 目录结构
@@ -26,7 +26,7 @@ xxx-code/
   internal/cli/              REPL、事件输出、自动保存
   internal/config/           配置与参数
   internal/engine/           核心运行时、消息模型、主循环、agent 管理
-  internal/mcp/              MCP 配置加载、stdio client、动态 tool bridge
+  internal/mcp/              MCP 配置加载、stdio/http/sse client、动态 tool bridge
   internal/persist/          session 与 agent 状态持久化
   internal/provider/         模型提供方适配
   internal/tools/            内建工具
@@ -210,7 +210,7 @@ REPL 里可以用 `:hooks` 查看当前配置。
 
 ## MCP
 
-`xxx-code` 现在会自动读取工作目录下的 `.mcp.json`，并把其中 `mcpServers` 里配置的本地 stdio server 动态注册成工具。
+`xxx-code` 现在会自动读取工作目录下的 `.mcp.json`，并把其中 `mcpServers` 里配置的 MCP server 动态注册成工具。目前支持三种 transport：`stdio`、`http`（streamable HTTP）和 `sse`。
 
 兼容的配置形态：
 
@@ -220,6 +220,17 @@ REPL 里可以用 `:hooks` 查看当前配置。
     "playwright": {
       "command": "npx",
       "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "remote_docs": {
+      "transport": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${TOKEN}"
+      }
+    },
+    "legacy_sse": {
+      "type": "sse",
+      "url": "https://example.com/sse"
     }
   }
 }
@@ -244,7 +255,7 @@ go run ./cmd/xxx-code \
   --mcp-config /path/to/.mcp.json
 ```
 
-REPL 里可以用 `:mcp` 查看每个 server 的连接状态、已注册工具和 warning。当前这版先支持本地 `stdio` transport；`http / sse / ws` 还没补。
+REPL 里可以用 `:mcp` 查看每个 server 的连接状态、transport、URL、已注册工具和 warning。远程 server 上配置的 `headers` 会透传到每个 HTTP 请求里，方便接鉴权代理或自定义网关。
 
 ## Agent 调度
 
@@ -265,6 +276,19 @@ go run ./cmd/xxx-code \
 
 `agent_list` 和 `:agents` 都会显示 `queued / running / idle / failed / cancelled` 这些状态。
 
+排队 agent 现在还支持 `priority`。当并发槽位满了以后，优先级更高的任务会先启动；同优先级下保持先进先出。`agent_spawn` 和 `agent_fanout.tasks[]` 都支持传这个字段。
+
+示例：
+
+```json
+{
+  "name": "reviewer",
+  "prompt": "优先检查回归风险",
+  "priority": 10,
+  "background": true
+}
+```
+
 ## 批量编排
 
 现在还补了两组更适合 multi-agent orchestration 的原语：
@@ -277,8 +301,8 @@ go run ./cmd/xxx-code \
 ```json
 {
   "tasks": [
-    {"name": "reader", "prompt": "分析 README 并提炼风险"},
-    {"name": "tester", "prompt": "检查最近改动的测试缺口"}
+    {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4},
+    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8}
   ],
   "wait": true
 }
@@ -360,8 +384,8 @@ go test ./...
 
 - 更完整的流式 TUI / 富交互界面
 - 更细粒度的权限系统
-- 远程 MCP transport（HTTP / SSE / WS）
+- 远程 MCP transport 里的 `ws`
 - remote agent / bridge / daemon
-- 更完整的任务调度、优先级与取消传播
+- 更完整的任务依赖图、资源配额与抢占式调度
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

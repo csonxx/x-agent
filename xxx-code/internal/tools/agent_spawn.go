@@ -16,6 +16,7 @@ type agentSpawnInput struct {
 	Name           string `json:"name,omitempty"`
 	Prompt         string `json:"prompt"`
 	Background     bool   `json:"background,omitempty"`
+	Priority       int    `json:"priority,omitempty"`
 	Model          string `json:"model,omitempty"`
 	MaxTurns       int    `json:"max_turns,omitempty"`
 	InheritHistory bool   `json:"inherit_history,omitempty"`
@@ -40,6 +41,10 @@ func (t *AgentSpawnTool) Definition() engine.ToolDefinition {
 				"background": map[string]any{
 					"type":        "boolean",
 					"description": "Run asynchronously if true.",
+				},
+				"priority": map[string]any{
+					"type":        "integer",
+					"description": "Optional scheduling priority. Higher values run first when agents are queued.",
 				},
 				"model": map[string]any{
 					"type":        "string",
@@ -75,6 +80,7 @@ func (t *AgentSpawnTool) Call(ctx context.Context, execCtx *engine.ExecutionCont
 		Name:           args.Name,
 		Prompt:         args.Prompt,
 		Background:     args.Background,
+		Priority:       args.Priority,
 		Model:          args.Model,
 		MaxTurns:       args.MaxTurns,
 		InheritHistory: args.InheritHistory,
@@ -90,6 +96,7 @@ func (t *AgentSpawnTool) Call(ctx context.Context, execCtx *engine.ExecutionCont
 				"agent_id":   snapshot.ID,
 				"name":       snapshot.Name,
 				"status":     snapshot.Status,
+				"priority":   snapshot.Priority,
 				"background": true,
 			}),
 		}, nil
@@ -184,6 +191,7 @@ func (t *AgentSendTool) Call(ctx context.Context, execCtx *engine.ExecutionConte
 type agentTaskInput struct {
 	Name           string `json:"name,omitempty"`
 	Prompt         string `json:"prompt"`
+	Priority       int    `json:"priority,omitempty"`
 	Model          string `json:"model,omitempty"`
 	MaxTurns       int    `json:"max_turns,omitempty"`
 	InheritHistory bool   `json:"inherit_history,omitempty"`
@@ -217,6 +225,10 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 							"prompt": map[string]any{
 								"type":        "string",
 								"description": "Task for the sub-agent.",
+							},
+							"priority": map[string]any{
+								"type":        "integer",
+								"description": "Optional scheduling priority. Higher values run first when agents are queued.",
 							},
 							"model": map[string]any{
 								"type":        "string",
@@ -269,6 +281,7 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 			Name:           task.Name,
 			Prompt:         task.Prompt,
 			Background:     true,
+			Priority:       task.Priority,
 			Model:          task.Model,
 			MaxTurns:       task.MaxTurns,
 			InheritHistory: task.InheritHistory,

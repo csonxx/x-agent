@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ type ServerStatus struct {
 	Name      string   `json:"name"`
 	Transport string   `json:"transport"`
 	Command   string   `json:"command,omitempty"`
+	URL       string   `json:"url,omitempty"`
 	Status    string   `json:"status"`
 	ToolNames []string `json:"tool_names,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
@@ -143,6 +145,7 @@ func Start(ctx context.Context, registry *engine.Registry, options Options) (*Ma
 			Name:      name,
 			Transport: serverCfg.Transport(),
 			Command:   serverCfg.Command,
+			URL:       serverCfg.URL,
 		}
 
 		if strings.TrimSpace(name) == "" {
@@ -151,15 +154,26 @@ func Start(ctx context.Context, registry *engine.Registry, options Options) (*Ma
 			manager.statuses = append(manager.statuses, status)
 			continue
 		}
-		if status.Transport != "stdio" {
+		switch status.Transport {
+		case "stdio":
+			if strings.TrimSpace(serverCfg.Command) == "" {
+				status.Status = ServerStatusFailed
+				status.Error = "stdio MCP server command cannot be empty"
+				manager.statuses = append(manager.statuses, status)
+				continue
+			}
+		case "http", "sse":
+			endpoint, err := serverCfg.Endpoint()
+			if err != nil {
+				status.Status = ServerStatusFailed
+				status.Error = err.Error()
+				manager.statuses = append(manager.statuses, status)
+				continue
+			}
+			status.URL = endpoint
+		default:
 			status.Status = ServerStatusFailed
 			status.Error = "unsupported MCP transport: " + status.Transport
-			manager.statuses = append(manager.statuses, status)
-			continue
-		}
-		if strings.TrimSpace(serverCfg.Command) == "" {
-			status.Status = ServerStatusFailed
-			status.Error = "stdio MCP server command cannot be empty"
 			manager.statuses = append(manager.statuses, status)
 			continue
 		}
@@ -255,31 +269,23 @@ func (m *Manager) ServerCount() int {
 }
 
 func connectServer(ctx context.Context, name string, cfg ServerConfig, workingDir string) (*connectedServer, error) {
-	commandDir, err := cfg.CommandDir(workingDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve cwd for %s: %w", name, err)
-	}
-
-	command := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
-	command.Dir = commandDir
-	command.Env = mergeEnv(os.Environ(), cfg.Env)
-	command.Stderr = os.Stderr
-
 	client := sdkmcp.NewClient(&sdkmcp.Implementation{
 		Name:    "xxx-code",
 		Version: "dev",
 	}, nil)
-	rootPath := workingDir
-	if strings.TrimSpace(rootPath) == "" {
-		rootPath = commandDir
-	}
+	rootPath := strings.TrimSpace(workingDir)
 	if fileURI, err := fileRootURI(rootPath); err == nil {
 		client.AddRoots(&sdkmcp.Root{
 			Name: "workspace",
 			URI:  fileURI,
 		})
 	}
-	session, err := client.Connect(ctx, &sdkmcp.CommandTransport{Command: command}, nil)
+
+	transport, err := buildTransport(ctx, name, cfg, workingDir)
+	if err != nil {
+		return nil, err
+	}
+	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect to MCP server %s: %w", name, err)
 	}
@@ -288,6 +294,42 @@ func connectServer(ctx context.Context, name string, cfg ServerConfig, workingDi
 		name:    name,
 		session: session,
 	}, nil
+}
+
+func buildTransport(ctx context.Context, name string, cfg ServerConfig, workingDir string) (sdkmcp.Transport, error) {
+	switch cfg.Transport() {
+	case "stdio":
+		commandDir, err := cfg.CommandDir(workingDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve cwd for %s: %w", name, err)
+		}
+
+		command := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
+		command.Dir = commandDir
+		command.Env = mergeEnv(os.Environ(), cfg.Env)
+		command.Stderr = os.Stderr
+		return &sdkmcp.CommandTransport{Command: command}, nil
+	case "http":
+		endpoint, err := cfg.Endpoint()
+		if err != nil {
+			return nil, err
+		}
+		return &sdkmcp.StreamableClientTransport{
+			Endpoint:   endpoint,
+			HTTPClient: newHTTPClient(cfg.Headers),
+		}, nil
+	case "sse":
+		endpoint, err := cfg.Endpoint()
+		if err != nil {
+			return nil, err
+		}
+		return &sdkmcp.SSEClientTransport{
+			Endpoint:   endpoint,
+			HTTPClient: newHTTPClient(cfg.Headers),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported MCP transport: %s", cfg.Transport())
+	}
 }
 
 func listAllTools(ctx context.Context, session *sdkmcp.ClientSession) ([]*sdkmcp.Tool, error) {
@@ -787,4 +829,36 @@ func fileRootURI(path string) (string, error) {
 		return "", err
 	}
 	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}).String(), nil
+}
+
+func newHTTPClient(headers map[string]string) *http.Client {
+	if len(headers) == 0 {
+		return nil
+	}
+	return &http.Client{
+		Transport: &headerRoundTripper{
+			base:    http.DefaultTransport,
+			headers: headers,
+		},
+	}
+}
+
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := rt.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+
+	cloned := req.Clone(req.Context())
+	cloned.Header = req.Header.Clone()
+	for key, value := range rt.headers {
+		cloned.Header.Del(key)
+		cloned.Header.Set(key, value)
+	}
+	return base.RoundTrip(cloned)
 }

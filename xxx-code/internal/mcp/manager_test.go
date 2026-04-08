@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -156,14 +158,135 @@ func TestStartLoadsToolsFromDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestStartLoadsToolsFromRemoteHTTPAndSSEConfig(t *testing.T) {
+	dir := t.TempDir()
+	httpServer := newProtectedMCPHTTPServer(t, "http", "X-Test-Token", "streamable-secret")
+	defer httpServer.Close()
+	sseServer := newProtectedMCPHTTPServer(t, "sse", "X-Test-Token", "sse-secret")
+	defer sseServer.Close()
+
+	configPath := filepath.Join(dir, ".mcp.json")
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "remote_http": {
+      "transport": "streamable-http",
+      "url": %q,
+      "headers": {"X-Test-Token": "streamable-secret"}
+    },
+    "remote_sse": {
+      "type": "sse",
+      "url": %q,
+      "headers": {"X-Test-Token": "sse-secret"}
+    }
+  }
+}`, httpServer.URL, sseServer.URL)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := engine.NewRegistry()
+	manager, err := Start(context.Background(), registry, Options{WorkingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager == nil {
+		t.Fatal("expected MCP manager to be created")
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	statuses := statusesByName(manager.Statuses())
+	if len(statuses) != 2 {
+		t.Fatalf("expected 2 MCP statuses, got %d", len(statuses))
+	}
+	if statuses["remote_http"].Status != ServerStatusConnected {
+		t.Fatalf("expected remote_http to connect, got %+v", statuses["remote_http"])
+	}
+	if statuses["remote_sse"].Status != ServerStatusConnected {
+		t.Fatalf("expected remote_sse to connect, got %+v", statuses["remote_sse"])
+	}
+	if statuses["remote_http"].URL != httpServer.URL {
+		t.Fatalf("expected normalized http URL, got %+v", statuses["remote_http"])
+	}
+	if statuses["remote_sse"].URL != sseServer.URL {
+		t.Fatalf("expected normalized sse URL, got %+v", statuses["remote_sse"])
+	}
+
+	for _, name := range []string{"mcp__remote_http__echo_text", "mcp__remote_sse__echo_text"} {
+		tool, ok := registry.Get(name)
+		if !ok {
+			t.Fatalf("expected bridged MCP tool %s to be registered", name)
+		}
+		input, _ := json.Marshal(map[string]any{"value": name})
+		result, err := tool.Call(context.Background(), nil, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IsError {
+			t.Fatalf("expected success result for %s, got error content: %s", name, result.Content)
+		}
+		if !strings.Contains(result.Content, name) {
+			t.Fatalf("expected echoed payload for %s, got %q", name, result.Content)
+		}
+	}
+
+	resourceListTool, _ := registry.Get("list_mcp_resources")
+	resourceListResult, err := resourceListTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(resourceListResult.Content, `"remote_http"`) || !strings.Contains(resourceListResult.Content, `"remote_sse"`) {
+		t.Fatalf("expected remote servers in resource listing, got %s", resourceListResult.Content)
+	}
+
+	readResourceTool, _ := registry.Get("read_mcp_resource")
+	readInput, _ := json.Marshal(map[string]any{
+		"server": "remote_http",
+		"uri":    "memory://note",
+	})
+	readResult, err := readResourceTool.Call(context.Background(), nil, readInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readResult.Content, `hello resource`) {
+		t.Fatalf("expected remote resource contents, got %s", readResult.Content)
+	}
+
+	promptsTool, _ := registry.Get("list_mcp_prompts")
+	promptListResult, err := promptsTool.Call(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(promptListResult.Content, `"remote_http"`) || !strings.Contains(promptListResult.Content, `"remote_sse"`) {
+		t.Fatalf("expected remote servers in prompt listing, got %s", promptListResult.Content)
+	}
+
+	getPromptTool, _ := registry.Get("get_mcp_prompt")
+	getPromptInput, _ := json.Marshal(map[string]any{
+		"server":    "remote_sse",
+		"name":      "review_code",
+		"arguments": map[string]string{"topic": "transports"},
+	})
+	getPromptResult, err := getPromptTool.Call(context.Background(), nil, getPromptInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(getPromptResult.Content, `Review transports carefully.`) {
+		t.Fatalf("expected prompt message, got %s", getPromptResult.Content)
+	}
+}
+
 func TestStartMarksUnsupportedTransportAsFailed(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mcp.json")
 	configJSON := `{
   "mcpServers": {
     "remote": {
-      "type": "http",
-      "command": "ignored"
+      "type": "ws",
+      "url": "https://example.com/mcp"
     }
   }
 }`
@@ -191,6 +314,40 @@ func TestStartMarksUnsupportedTransportAsFailed(t *testing.T) {
 	}
 }
 
+func TestStartMarksMissingRemoteURLAsFailed(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".mcp.json")
+	configJSON := `{
+  "mcpServers": {
+    "remote": {
+      "type": "http"
+    }
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := Start(context.Background(), engine.NewRegistry(), Options{WorkingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager == nil {
+		t.Fatal("expected manager even when server load fails")
+	}
+
+	statuses := manager.Statuses()
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %d", len(statuses))
+	}
+	if statuses[0].Status != ServerStatusFailed {
+		t.Fatalf("expected failed status, got %+v", statuses[0])
+	}
+	if !strings.Contains(statuses[0].Error, "url cannot be empty") {
+		t.Fatalf("unexpected error: %+v", statuses[0])
+	}
+}
+
 func TestMCPHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_MCP_HELPER") != "1" {
 		return
@@ -200,6 +357,15 @@ func TestMCPHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 
+	server := newHelperServer()
+	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func newHelperServer() *sdkmcp.Server {
 	server := sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "helper-server",
 		Version: "1.0.0",
@@ -272,10 +438,41 @@ func TestMCPHelperProcess(t *testing.T) {
 			},
 		}, nil
 	})
+	return server
+}
 
-	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+func newProtectedMCPHTTPServer(t *testing.T, transport, header, value string) *httptest.Server {
+	t.Helper()
+
+	var handler http.Handler
+	switch transport {
+	case "http":
+		handler = sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+			return newHelperServer()
+		}, nil)
+	case "sse":
+		handler = sdkmcp.NewSSEHandler(func(*http.Request) *sdkmcp.Server {
+			return newHelperServer()
+		}, nil)
+	default:
+		t.Fatalf("unsupported test transport: %s", transport)
 	}
-	os.Exit(0)
+
+	next := handler
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(header); got != value {
+			http.Error(w, "missing required header", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+	return httptest.NewServer(handler)
+}
+
+func statusesByName(statuses []ServerStatus) map[string]ServerStatus {
+	byName := make(map[string]ServerStatus, len(statuses))
+	for _, status := range statuses {
+		byName[status.Name] = status
+	}
+	return byName
 }

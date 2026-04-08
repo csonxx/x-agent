@@ -104,8 +104,8 @@ func NewRunner(provider Provider, registry *Registry, config RunnerConfig) *Runn
 		registry: registry,
 		config:   config,
 		agentState: &agentState{
-			agents: make(map[string]*managedAgent),
-			slots:  make(chan struct{}, config.MaxParallelAgents),
+			agents:      make(map[string]*managedAgent),
+			maxParallel: config.MaxParallelAgents,
 		},
 	}
 }

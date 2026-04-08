@@ -27,6 +27,7 @@ type AgentSnapshot struct {
 	ParentID    string      `json:"parent_id,omitempty"`
 	Children    []string    `json:"children,omitempty"`
 	Status      AgentStatus `json:"status"`
+	Priority    int         `json:"priority,omitempty"`
 	Prompt      string      `json:"prompt"`
 	Result      string      `json:"result,omitempty"`
 	Error       string      `json:"error,omitempty"`
@@ -48,6 +49,7 @@ type SpawnRequest struct {
 	Name           string
 	Prompt         string
 	Background     bool
+	Priority       int
 	Model          string
 	MaxTurns       int
 	WorkingDir     string
@@ -55,9 +57,11 @@ type SpawnRequest struct {
 }
 
 type agentState struct {
-	mu     sync.RWMutex
-	agents map[string]*managedAgent
-	slots  chan struct{}
+	mu           sync.RWMutex
+	agents       map[string]*managedAgent
+	maxParallel  int
+	running      int
+	nextQueueSeq uint64
 }
 
 type managedAgent struct {
@@ -66,8 +70,10 @@ type managedAgent struct {
 	runner   *Runner
 	depth    int
 	done     chan struct{}
+	ctx      context.Context
 	cancel   context.CancelFunc
 	runSeq   uint64
+	queueSeq uint64
 }
 
 func newAgentID() (string, error) {
@@ -84,38 +90,70 @@ func closedDone() chan struct{} {
 	return ch
 }
 
-func (s *agentState) tryAcquireSlot() bool {
-	if s == nil || s.slots == nil {
+func (s *agentState) reserveSlotLocked() bool {
+	if s == nil {
 		return true
 	}
-	select {
-	case s.slots <- struct{}{}:
+	if s.maxParallel <= 0 || s.running < s.maxParallel {
+		s.running++
 		return true
-	default:
-		return false
 	}
+	return false
 }
 
-func (s *agentState) acquireSlot(ctx context.Context) bool {
-	if s == nil || s.slots == nil {
-		return true
-	}
-	select {
-	case s.slots <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func (s *agentState) releaseSlot() {
-	if s == nil || s.slots == nil {
+func (s *agentState) releaseSlotLocked() {
+	if s == nil || s.running <= 0 {
 		return
 	}
-	select {
-	case <-s.slots:
-	default:
+	s.running--
+}
+
+func (s *agentState) enqueueLocked(agent *managedAgent) {
+	if s == nil || agent == nil {
+		return
 	}
+	agent.queueSeq = s.nextQueueSeq
+	s.nextQueueSeq++
+}
+
+func (s *agentState) nextQueuedLocked() *managedAgent {
+	if s == nil || !s.reserveSlotLocked() {
+		return nil
+	}
+
+	var next *managedAgent
+	for _, agent := range s.agents {
+		if agent.snapshot.Status != AgentQueued {
+			continue
+		}
+		if next == nil || shouldRunBefore(agent, next) {
+			next = agent
+		}
+	}
+	if next == nil {
+		s.releaseSlotLocked()
+		return nil
+	}
+
+	next.snapshot.Status = AgentRunning
+	next.queueSeq = 0
+	return next
+}
+
+func shouldRunBefore(candidate, current *managedAgent) bool {
+	if candidate == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	if candidate.snapshot.Priority != current.snapshot.Priority {
+		return candidate.snapshot.Priority > current.snapshot.Priority
+	}
+	if candidate.queueSeq != current.queueSeq {
+		return candidate.queueSeq < current.queueSeq
+	}
+	return candidate.snapshot.StartedAt.Before(current.snapshot.StartedAt)
 }
 
 func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (AgentSnapshot, error) {
@@ -145,18 +183,14 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 	if request.InheritHistory && parent != nil && parent.Session != nil {
 		childSession.Replace(parent.Session.Snapshot())
 	}
-	acquired := r.agentState.tryAcquireSlot()
-	initialStatus := AgentQueued
-	if acquired {
-		initialStatus = AgentRunning
-	}
 
 	agent := &managedAgent{
 		snapshot: AgentSnapshot{
 			ID:         id,
 			Name:       name,
 			ParentID:   parentID,
-			Status:     initialStatus,
+			Status:     AgentQueued,
+			Priority:   request.Priority,
 			Prompt:     request.Prompt,
 			Background: request.Background,
 			StartedAt:  time.Now(),
@@ -169,9 +203,15 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
+	agent.ctx = runCtx
 	agent.cancel = cancel
 
 	r.agentState.mu.Lock()
+	if r.agentState.reserveSlotLocked() {
+		agent.snapshot.Status = AgentRunning
+	} else {
+		r.agentState.enqueueLocked(agent)
+	}
 	r.agentState.agents[id] = agent
 	if parentID != "" {
 		if parentAgent, ok := r.agentState.agents[parentID]; ok {
@@ -188,7 +228,9 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 	})
 
 	snapshot := cloneAgentSnapshot(agent.snapshot)
-	r.runManagedAgent(agent, request.Prompt, agent.done, runCtx, agent.runSeq, acquired)
+	if snapshot.Status == AgentRunning {
+		r.runManagedAgent(agent, request.Prompt, agent.done, runCtx, agent.runSeq)
+	}
 
 	if request.Background {
 		return snapshot, nil
@@ -217,27 +259,32 @@ func (r *Runner) SendAgent(ctx context.Context, id, prompt string, background bo
 	}
 
 	agent.runSeq++
-	acquired := r.agentState.tryAcquireSlot()
 	agent.snapshot.Status = AgentQueued
-	if acquired {
-		agent.snapshot.Status = AgentRunning
-	}
 	agent.snapshot.Prompt = prompt
 	agent.snapshot.Result = ""
 	agent.snapshot.Error = ""
 	agent.snapshot.Background = background
 	agent.snapshot.CompletedAt = nil
 	agent.done = make(chan struct{})
+	agent.queueSeq = 0
 
 	runCtx, cancel := context.WithCancel(context.Background())
+	agent.ctx = runCtx
 	agent.cancel = cancel
+	if r.agentState.reserveSlotLocked() {
+		agent.snapshot.Status = AgentRunning
+	} else {
+		r.agentState.enqueueLocked(agent)
+	}
 
 	snapshot := cloneAgentSnapshot(agent.snapshot)
 	done := agent.done
 	runSeq := agent.runSeq
 	r.agentState.mu.Unlock()
 
-	r.runManagedAgent(agent, prompt, done, runCtx, runSeq, acquired)
+	if snapshot.Status == AgentRunning {
+		r.runManagedAgent(agent, prompt, done, runCtx, runSeq)
+	}
 
 	if background {
 		return snapshot, nil
@@ -271,13 +318,16 @@ func (r *Runner) CancelAgent(ctx context.Context, id string, recursive bool) (Ag
 		}
 		cancellations = append(cancellations, pendingCancel{
 			id:     targetID,
-			active: agent.snapshot.Status == AgentRunning || agent.snapshot.Status == AgentQueued,
+			active: agent.snapshot.Status == AgentRunning,
 			cancel: agent.cancel,
 		})
 	}
 	r.agentState.mu.RUnlock()
 
 	for _, item := range cancellations {
+		if err := r.cancelQueuedAgent(item.id); err != nil {
+			return AgentSnapshot{}, err
+		}
 		if item.active && item.cancel != nil {
 			item.cancel()
 		}
@@ -428,28 +478,9 @@ func (r *Runner) ImportAgents(states []PersistedAgentState) error {
 	return nil
 }
 
-func (r *Runner) runManagedAgent(agent *managedAgent, prompt string, done chan struct{}, runCtx context.Context, runSeq uint64, acquired bool) {
+func (r *Runner) runManagedAgent(agent *managedAgent, prompt string, done chan struct{}, runCtx context.Context, runSeq uint64) {
 	go func() {
 		defer close(done)
-
-		slotHeld := acquired
-		if !slotHeld {
-			if !r.agentState.acquireSlot(runCtx) {
-				r.finishManagedAgent(agent, runSeq, RunResult{}, runCtx.Err())
-				return
-			}
-			slotHeld = true
-			r.agentState.mu.Lock()
-			if agent.runSeq != runSeq {
-				r.agentState.mu.Unlock()
-				r.agentState.releaseSlot()
-				return
-			}
-			if agent.snapshot.Status == AgentQueued {
-				agent.snapshot.Status = AgentRunning
-			}
-			r.agentState.mu.Unlock()
-		}
 
 		result, runErr := agent.runner.runTurn(runCtx, &ExecutionContext{
 			Runner:     agent.runner,
@@ -459,19 +490,32 @@ func (r *Runner) runManagedAgent(agent *managedAgent, prompt string, done chan s
 			AgentName:  agent.snapshot.Name,
 			Depth:      agent.depth,
 		}, prompt)
-		if slotHeld {
-			r.agentState.releaseSlot()
-		}
 		r.finishManagedAgent(agent, runSeq, result, runErr)
 	}()
 }
 
 func (r *Runner) finishManagedAgent(agent *managedAgent, runSeq uint64, result RunResult, runErr error) {
 	finished := time.Now()
+	var nextAgent *managedAgent
+	var nextDone chan struct{}
+	var nextCtx context.Context
+	var nextPrompt string
+	var nextRunSeq uint64
 
 	r.agentState.mu.Lock()
+	r.agentState.releaseSlotLocked()
 	if agent.runSeq != runSeq {
+		nextAgent = r.agentState.nextQueuedLocked()
+		if nextAgent != nil {
+			nextDone = nextAgent.done
+			nextCtx = nextAgent.ctx
+			nextPrompt = nextAgent.snapshot.Prompt
+			nextRunSeq = nextAgent.runSeq
+		}
 		r.agentState.mu.Unlock()
+		if nextAgent != nil {
+			r.runManagedAgent(nextAgent, nextPrompt, nextDone, nextCtx, nextRunSeq)
+		}
 		return
 	}
 
@@ -491,8 +535,17 @@ func (r *Runner) finishManagedAgent(agent *managedAgent, runSeq uint64, result R
 	}
 
 	agent.snapshot.CompletedAt = &finished
+	agent.queueSeq = 0
+	agent.ctx = nil
 	agent.cancel = nil
 	snapshot := cloneAgentSnapshot(agent.snapshot)
+	nextAgent = r.agentState.nextQueuedLocked()
+	if nextAgent != nil {
+		nextDone = nextAgent.done
+		nextCtx = nextAgent.ctx
+		nextPrompt = nextAgent.snapshot.Prompt
+		nextRunSeq = nextAgent.runSeq
+	}
 	r.agentState.mu.Unlock()
 
 	event := Event{
@@ -508,6 +561,47 @@ func (r *Runner) finishManagedAgent(agent *managedAgent, runSeq uint64, result R
 		event.Text = snapshot.Error
 	}
 	r.emit(event)
+	if nextAgent != nil {
+		r.runManagedAgent(nextAgent, nextPrompt, nextDone, nextCtx, nextRunSeq)
+	}
+}
+
+func (r *Runner) cancelQueuedAgent(id string) error {
+	finished := time.Now()
+
+	r.agentState.mu.Lock()
+	agent, ok := r.agentState.agents[id]
+	if !ok {
+		r.agentState.mu.Unlock()
+		return errors.New("agent not found")
+	}
+	if agent.snapshot.Status != AgentQueued {
+		r.agentState.mu.Unlock()
+		return nil
+	}
+
+	agent.snapshot.Status = AgentCancelled
+	agent.snapshot.Error = "agent run cancelled"
+	agent.snapshot.Result = ""
+	agent.snapshot.CompletedAt = &finished
+	agent.queueSeq = 0
+	agent.ctx = nil
+	if agent.cancel != nil {
+		agent.cancel()
+	}
+	agent.cancel = nil
+	done := agent.done
+	snapshot := cloneAgentSnapshot(agent.snapshot)
+	r.agentState.mu.Unlock()
+
+	close(done)
+	r.emit(Event{
+		Kind:      EventAgentCancelled,
+		AgentID:   snapshot.ID,
+		AgentName: snapshot.Name,
+		Text:      snapshot.Error,
+	})
+	return nil
 }
 
 func (r *Runner) cancelTargets(id string, recursive bool) ([]string, error) {
