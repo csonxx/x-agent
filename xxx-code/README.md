@@ -133,6 +133,15 @@ go run ./cmd/xxx-code \
   --listen 127.0.0.1:7331
 ```
 
+如果你要把 daemon 暴露给别的机器、别的服务，建议至少打开 bearer token：
+
+```bash
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 127.0.0.1:7331 \
+  --daemon-token dev-secret
+```
+
 daemon 会把远程 session 存到：
 
 ```text
@@ -178,6 +187,14 @@ go run ./cmd/xxx-code \
 curl -s http://127.0.0.1:7331/v1/sessions -X POST
 ```
 
+如果 daemon 开了 token，就把 `Authorization` 一起带上：
+
+```bash
+curl -s http://127.0.0.1:7331/v1/sessions \
+  -X POST \
+  -H 'Authorization: Bearer dev-secret'
+```
+
 然后驱动它跑一轮：
 
 ```bash
@@ -214,6 +231,15 @@ go run ./cmd/xxx-code \
   --remote-session repo-main
 ```
 
+如果远端 daemon 开了 token，就再加上：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --remote-token dev-secret \
+  --remote-session repo-main
+```
+
 或者单次远程执行一轮：
 
 ```bash
@@ -247,6 +273,7 @@ go run ./cmd/xxx-code \
 - `:quit`
 
 这一路径下，本地 CLI 不需要直接配置 `ANTHROPIC_API_KEY`，模型调用和 session 持久化都由 daemon 负责。
+如果 daemon 开了 `--daemon-token`，remote bridge 会用 `--remote-token` 或环境变量 `XXX_CODE_REMOTE_TOKEN` 自动发 `Authorization: Bearer ...`。
 
 默认情况下，`--remote-url` 会沿用 `--stream=true`，所以远程单次执行和远程 REPL 也会边收到文本边打印；如果你更想等整轮结束后再输出，可以显式关掉：
 

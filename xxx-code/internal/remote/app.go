@@ -33,7 +33,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 	}
 	return &App{
 		config: cfg,
-		client: NewClient(cfg.RemoteURL, nil),
+		client: NewClient(cfg.RemoteURL, cfg.RemoteToken, nil),
 		out:    out,
 		errOut: errOut,
 	}

@@ -35,8 +35,10 @@ type Config struct {
 	CompactKeep       int
 	Daemon            bool
 	DaemonListenAddr  string
+	DaemonToken       string
 	DaemonDir         string
 	RemoteURL         string
+	RemoteToken       string
 	RemoteSession     string
 	RemoteList        bool
 	WorkingDir        string
@@ -78,7 +80,9 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.CompactKeep, "compact-keep", 12, "How many latest messages to keep verbatim during automatic compaction")
 	flag.BoolVar(&cfg.Daemon, "daemon", false, "Run xxx-code as a persistent HTTP daemon")
 	flag.StringVar(&cfg.DaemonListenAddr, "listen", firstNonEmpty(os.Getenv("XXX_CODE_LISTEN"), "127.0.0.1:7331"), "Listen address for daemon mode")
+	flag.StringVar(&cfg.DaemonToken, "daemon-token", strings.TrimSpace(os.Getenv("XXX_CODE_DAEMON_TOKEN")), "Optional bearer token required by the daemon for /v1/* requests")
 	flag.StringVar(&cfg.RemoteURL, "remote-url", strings.TrimSpace(os.Getenv("XXX_CODE_REMOTE_URL")), "Daemon base URL to use as a remote bridge")
+	flag.StringVar(&cfg.RemoteToken, "remote-token", strings.TrimSpace(os.Getenv("XXX_CODE_REMOTE_TOKEN")), "Bearer token to send when connecting to a protected daemon")
 	flag.StringVar(&cfg.RemoteSession, "remote-session", "", "Remote daemon session ID to open or create")
 	flag.BoolVar(&cfg.RemoteList, "remote-list-sessions", false, "List daemon sessions instead of running a local session")
 	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")

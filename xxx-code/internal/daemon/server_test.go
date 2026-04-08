@@ -137,6 +137,43 @@ func TestDaemonCanReloadSavedSession(t *testing.T) {
 	}
 }
 
+func TestDaemonCanRequireBearerToken(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonToken = "secret-token"
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/v1/sessions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 401 without token, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/v1/sessions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret-token")
+	payload := doJSON(t, req, http.StatusOK)
+	if len(payload["sessions"].([]any)) != 0 {
+		t.Fatalf("expected no sessions, got %+v", payload)
+	}
+}
+
 func newTestDaemon(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := newTestConfig(t)

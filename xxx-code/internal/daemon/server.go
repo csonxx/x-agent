@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -219,6 +220,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		summaries, err := s.listSessions()
@@ -249,6 +253,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
+	if !s.authorize(w, r) {
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
 	path = strings.Trim(path, "/")
 	if path == "" {
@@ -1122,6 +1129,22 @@ func writeError(w http.ResponseWriter, status int, err error) {
 func writeMethodNotAllowed(w http.ResponseWriter, methods ...string) {
 	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
+}
+
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+	token := strings.TrimSpace(s.config.DaemonToken)
+	if token == "" {
+		return true
+	}
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	parts := strings.Fields(auth)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") &&
+		subtle.ConstantTimeCompare([]byte(parts[1]), []byte(token)) == 1 {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="xxx-code"`)
+	writeError(w, http.StatusUnauthorized, errors.New("unauthorized"))
+	return false
 }
 
 func newSessionID() (string, error) {

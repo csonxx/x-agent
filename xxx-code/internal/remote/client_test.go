@@ -207,6 +207,38 @@ func TestClientStreamTurn(t *testing.T) {
 	}
 }
 
+func TestClientCanUseRemoteToken(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonToken = "shared-secret"
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	unauthorized := NewClient(httpServer.URL, "", httpServer.Client())
+	_, err := unauthorized.ListSessions(context.Background())
+	if err == nil {
+		t.Fatal("expected unauthorized client to fail")
+	}
+	var remoteErr *Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != 401 {
+		t.Fatalf("expected 401 from unauthorized client, got %v", err)
+	}
+
+	authorized := NewClient(httpServer.URL, "shared-secret", httpServer.Client())
+	session, err := authorized.EnsureSession(context.Background(), "protected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ID != "protected" {
+		t.Fatalf("unexpected session: %+v", session)
+	}
+}
+
 func newTestClient(t *testing.T) (*Client, func()) {
 	t.Helper()
 	cfg := newTestConfig(t)
@@ -214,7 +246,7 @@ func newTestClient(t *testing.T) (*Client, func()) {
 		return &remoteTestProvider{}
 	})
 	httpServer := httptest.NewServer(server.Handler())
-	client := NewClient(httpServer.URL, httpServer.Client())
+	client := NewClient(httpServer.URL, "", httpServer.Client())
 	return client, func() {
 		httpServer.Close()
 		_ = server.Close()
@@ -228,7 +260,7 @@ func newStreamingTestClient(t *testing.T) (*Client, func()) {
 		return &remoteStreamingTestProvider{}
 	})
 	httpServer := httptest.NewServer(server.Handler())
-	client := NewClient(httpServer.URL, httpServer.Client())
+	client := NewClient(httpServer.URL, "", httpServer.Client())
 	return client, func() {
 		httpServer.Close()
 		_ = server.Close()

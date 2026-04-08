@@ -20,6 +20,7 @@ import (
 
 type Client struct {
 	baseURL    string
+	token      string
 	httpClient *http.Client
 }
 
@@ -84,7 +85,7 @@ type TurnStreamEvent struct {
 	Error     string          `json:"error,omitempty"`
 }
 
-func NewClient(baseURL string, httpClient *http.Client) *Client {
+func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	baseURL = strings.TrimRight(baseURL, "/")
 	if httpClient == nil {
@@ -94,6 +95,7 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 	}
 	return &Client{
 		baseURL:    baseURL,
+		token:      strings.TrimSpace(token),
 		httpClient: httpClient,
 	}
 }
@@ -214,6 +216,7 @@ func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	c.applyAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -480,6 +483,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody an
 	if requestBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	c.applyAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -521,4 +525,11 @@ func withServerQuery(path, serverName string) string {
 	values := url.Values{}
 	values.Set("server", serverName)
 	return path + "?" + values.Encode()
+}
+
+func (c *Client) applyAuth(req *http.Request) {
+	if req == nil || strings.TrimSpace(c.token) == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
 }
