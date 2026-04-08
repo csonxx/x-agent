@@ -146,6 +146,7 @@ type fanoutTaskPayload struct {
 	Prompt         string   `json:"prompt"`
 	ResolvedPrompt string   `json:"resolved_prompt"`
 	DependsOn      []string `json:"depends_on"`
+	Resource       string   `json:"resource"`
 	Retries        int      `json:"retries"`
 	Attempts       int      `json:"attempts"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
@@ -924,6 +925,121 @@ func TestAgentFanoutToolFailFastWaitsForRetriesToExhaust(t *testing.T) {
 		if byName["later"].Status != "skipped" {
 			t.Fatalf("expected later task to be skipped after fail_fast, got %+v", byName["later"])
 		}
+	}
+}
+
+func TestAgentFanoutToolHonorsResourceLimits(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 4,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":            true,
+			"resource_limits": map[string]int{"browser": 1},
+			"tasks": []map[string]any{
+				{"name": "browser_a", "prompt": "browser a", "resource": "browser"},
+				{"name": "browser_b", "prompt": "browser b", "resource": "browser"},
+				{"name": "cpu_job", "prompt": "cpu job", "resource": "cpu"},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	browserAStarted := provider.startedChan("browser a")
+	browserBStarted := provider.startedChan("browser b")
+	cpuStarted := provider.startedChan("cpu job")
+
+	select {
+	case <-browserAStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("browser_a did not start")
+	}
+	select {
+	case <-cpuStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cpu job did not start")
+	}
+	select {
+	case <-browserBStarted:
+		t.Fatal("browser_b started before browser resource was released")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(provider.releaseChan("cpu job"))
+	close(provider.releaseChan("browser a"))
+
+	select {
+	case <-browserBStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("browser_b did not start after browser resource was released")
+	}
+	close(provider.releaseChan("browser b"))
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if result.IsError {
+			t.Fatalf("expected success, got error result: %s", result.Content)
+		}
+		var payload fanoutResponse
+		if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+			t.Fatal(err)
+		}
+		byName := mapFanoutTasks(payload.Tasks)
+		if byName["browser_a"].Resource != "browser" || byName["browser_b"].Resource != "browser" {
+			t.Fatalf("expected browser resource labels, got %+v", byName)
+		}
+	}
+}
+
+func TestAgentFanoutToolRejectsInvalidResourceLimits(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait":            true,
+		"resource_limits": map[string]int{"browser": 0},
+		"tasks": []map[string]any{
+			{"name": "browser_a", "prompt": "browser a", "resource": "browser"},
+		},
+	})
+
+	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err == nil || !strings.Contains(err.Error(), "must be greater than 0") {
+		t.Fatalf("expected invalid resource limit error, got %v", err)
 	}
 }
 

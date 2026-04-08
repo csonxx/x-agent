@@ -301,10 +301,11 @@ go run ./cmd/xxx-code \
 ```json
 {
   "max_parallel": 2,
+  "resource_limits": {"browser": 1},
   "fail_fast": true,
   "tasks": [
     {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4, "retries": 1},
-    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8, "timeout_seconds": 30},
+    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8, "resource": "browser", "timeout_seconds": 30},
     {
       "name": "writer",
       "prompt": "基于 {{tasks.reader.result}} 和 {{tasks.tester.result}} 输出结论",
@@ -337,6 +338,8 @@ go run ./cmd/xxx-code \
 - `timeout_seconds`: 单任务超时，超时后对应 agent 会被取消，task 状态记成 `timed_out`
 
 `fail_fast` 会等某个任务把自己的重试次数耗尽后再真正触发，所以它和 `retries` 可以组合使用。带这些执行控制的 workflow 同样要求 `wait=true`，因为需要由编排器负责调度和回收。
+
+如果 workflow 里有某类任务不适合并发跑，还可以给 task 打上 `resource`，再用 `resource_limits` 做资源池限流。例如上面的 `"browser": 1` 就表示同一时刻最多只跑一个 `resource="browser"` 的任务；其它不在这个资源池里的任务不受影响。
 
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
@@ -416,6 +419,6 @@ go test ./...
 - 更细粒度的权限系统
 - 远程 MCP transport 里的 `ws`
 - remote agent / bridge / daemon
-- 资源配额、抢占式调度与更复杂的 workflow 恢复
+- 抢占式调度与更复杂的 workflow 恢复
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

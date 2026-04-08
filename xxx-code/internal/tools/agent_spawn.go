@@ -194,6 +194,7 @@ type agentTaskInput struct {
 	Name           string   `json:"name,omitempty"`
 	Prompt         string   `json:"prompt"`
 	DependsOn      []string `json:"depends_on,omitempty"`
+	Resource       string   `json:"resource,omitempty"`
 	Priority       int      `json:"priority,omitempty"`
 	Retries        int      `json:"retries,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
@@ -209,6 +210,7 @@ type agentFanoutInput struct {
 	Tasks          []agentTaskInput `json:"tasks"`
 	Wait           bool             `json:"wait,omitempty"`
 	MaxParallel    int              `json:"max_parallel,omitempty"`
+	ResourceLimits map[string]int   `json:"resource_limits,omitempty"`
 	FailFast       bool             `json:"fail_fast,omitempty"`
 	TimeoutSeconds int              `json:"timeout_seconds,omitempty"`
 }
@@ -237,6 +239,10 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 								"type":        "array",
 								"items":       map[string]any{"type": "string"},
 								"description": "Optional dependency list by task name. Requires wait=true.",
+							},
+							"resource": map[string]any{
+								"type":        "string",
+								"description": "Optional resource pool name for workflow-local concurrency limits.",
 							},
 							"priority": map[string]any{
 								"type":        "integer",
@@ -279,6 +285,11 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 					"type":        "integer",
 					"description": "Optional workflow-local concurrency cap used when wait=true.",
 				},
+				"resource_limits": map[string]any{
+					"type":                 "object",
+					"description":          "Optional workflow-local resource pool limits keyed by resource name.",
+					"additionalProperties": map[string]any{"type": "integer"},
+				},
 				"fail_fast": map[string]any{
 					"type":        "boolean",
 					"description": "Cancel active workflow tasks and skip pending ones when any task fails. Only applies when wait=true.",
@@ -301,6 +312,10 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 	if len(args.Tasks) == 0 {
 		return engine.ToolResult{}, fmt.Errorf("tasks must not be empty")
 	}
+	resourceLimits, err := normalizeFanoutResourceLimits(args.ResourceLimits)
+	if err != nil {
+		return engine.ToolResult{}, err
+	}
 
 	plan, hasDependencies, err := buildFanoutPlan(args.Tasks)
 	if err != nil {
@@ -309,7 +324,7 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 	if hasDependencies && !args.Wait {
 		return engine.ToolResult{}, fmt.Errorf("depends_on requires wait=true so xxx-code can orchestrate the workflow")
 	}
-	workflowMode := hasDependencies || args.MaxParallel > 0 || args.FailFast || hasFanoutTaskExecutionControls(plan)
+	workflowMode := hasDependencies || args.MaxParallel > 0 || len(resourceLimits) > 0 || args.FailFast || hasFanoutTaskExecutionControls(plan)
 	if workflowMode && !args.Wait {
 		return engine.ToolResult{}, fmt.Errorf("workflow controls require wait=true")
 	}
@@ -322,8 +337,9 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 		}
 
 		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan, fanoutExecutionOptions{
-			maxParallel: args.MaxParallel,
-			failFast:    args.FailFast,
+			maxParallel:    args.MaxParallel,
+			resourceLimits: resourceLimits,
+			failFast:       args.FailFast,
 		})
 		if err != nil {
 			return engine.ToolResult{}, err
@@ -559,6 +575,7 @@ type fanoutTaskResult struct {
 	Prompt         string   `json:"prompt"`
 	ResolvedPrompt string   `json:"resolved_prompt,omitempty"`
 	DependsOn      []string `json:"depends_on,omitempty"`
+	Resource       string   `json:"resource,omitempty"`
 	Priority       int      `json:"priority,omitempty"`
 	Retries        int      `json:"retries,omitempty"`
 	Attempts       int      `json:"attempts,omitempty"`
@@ -594,8 +611,9 @@ type fanoutWaitResult struct {
 }
 
 type fanoutExecutionOptions struct {
-	maxParallel int
-	failFast    bool
+	maxParallel    int
+	resourceLimits map[string]int
+	failFast       bool
 }
 
 type fanoutPromptReference struct {
@@ -639,6 +657,7 @@ func buildFanoutPlan(tasks []agentTaskInput) ([]*plannedFanoutTask, bool, error)
 				Name:           displayName,
 				Prompt:         task.Prompt,
 				DependsOn:      append([]string(nil), normalizedDeps...),
+				Resource:       normalizeFanoutResource(task.Resource),
 				Priority:       task.Priority,
 				Retries:        task.Retries,
 				TimeoutSeconds: task.TimeoutSeconds,
@@ -705,6 +724,7 @@ func validateFanoutPlanCycles(plan []*plannedFanoutTask) error {
 
 func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, plan []*plannedFanoutTask, options fanoutExecutionOptions) ([]fanoutTaskResult, []engine.AgentSnapshot, error) {
 	active := make(map[string]int, len(plan))
+	activeResources := make(map[string]int)
 	resultsCh := make(chan fanoutWaitResult, len(plan))
 	failFastTriggered := false
 
@@ -736,6 +756,9 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				continue
 			}
 			if !dependenciesSatisfied(item, plan) {
+				continue
+			}
+			if !resourceAvailable(item, activeResources, options.resourceLimits) {
 				continue
 			}
 			prompt, err := renderFanoutPrompt(item, plan)
@@ -773,6 +796,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			item.result.AgentID = snapshot.ID
 			item.result.Attempts = item.attempts
 			active[snapshot.ID] = item.index
+			incrementFanoutResource(activeResources, item.task.Resource)
 
 			go func(index, attempt int, agentID string, timeoutSeconds int) {
 				snapshot, timedOut, err := waitForFanoutTask(ctx, execCtx, agentID, timeoutSeconds)
@@ -811,6 +835,10 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			cancelFanoutAgents(execCtx, active)
 			return nil, nil, ctx.Err()
 		case item := <-resultsCh:
+			index, ok := active[item.agentID]
+			if ok {
+				decrementFanoutResource(activeResources, plan[index].task.Resource)
+			}
 			delete(active, item.agentID)
 			if item.err != nil {
 				cancelFanoutAgents(execCtx, active)
@@ -952,6 +980,64 @@ func hasFanoutTaskExecutionControls(plan []*plannedFanoutTask) bool {
 		}
 	}
 	return false
+}
+
+func normalizeFanoutResourceLimits(input map[string]int) (map[string]int, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+
+	normalized := make(map[string]int, len(input))
+	for rawName, limit := range input {
+		name := normalizeFanoutResource(rawName)
+		if name == "" {
+			return nil, fmt.Errorf("resource_limits contains an empty resource name")
+		}
+		if limit <= 0 {
+			return nil, fmt.Errorf("resource limit for %s must be greater than 0", name)
+		}
+		normalized[name] = limit
+	}
+	return normalized, nil
+}
+
+func normalizeFanoutResource(value string) string {
+	return strings.TrimSpace(value)
+}
+
+func resourceAvailable(item *plannedFanoutTask, activeResources, resourceLimits map[string]int) bool {
+	if item == nil {
+		return true
+	}
+	resource := normalizeFanoutResource(item.task.Resource)
+	if resource == "" {
+		return true
+	}
+	limit, ok := resourceLimits[resource]
+	if !ok || limit <= 0 {
+		return true
+	}
+	return activeResources[resource] < limit
+}
+
+func incrementFanoutResource(activeResources map[string]int, resource string) {
+	resource = normalizeFanoutResource(resource)
+	if resource == "" {
+		return
+	}
+	activeResources[resource]++
+}
+
+func decrementFanoutResource(activeResources map[string]int, resource string) {
+	resource = normalizeFanoutResource(resource)
+	if resource == "" {
+		return
+	}
+	if activeResources[resource] <= 1 {
+		delete(activeResources, resource)
+		return
+	}
+	activeResources[resource]--
 }
 
 func waitForFanoutTask(ctx context.Context, execCtx *engine.ExecutionContext, agentID string, timeoutSeconds int) (engine.AgentSnapshot, bool, error) {
