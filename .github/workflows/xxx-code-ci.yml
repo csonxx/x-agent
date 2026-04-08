@@ -1,0 +1,33 @@
+name: xxx-code CI
+
+on:
+  push:
+    paths:
+      - "xxx-code/**"
+      - ".github/workflows/xxx-code-ci.yml"
+  pull_request:
+    paths:
+      - "xxx-code/**"
+      - ".github/workflows/xxx-code-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+
+      - name: Check gofmt
+        run: test -z "$(gofmt -l $(find . -type f -name '*.go'))"
+
+      - name: Run tests
+        run: go test ./...

@@ -1,0 +1,109 @@
+# xxx-code Roadmap
+
+更新时间：2026-04-08
+
+## 目标
+
+把 `xxx-code` 从“已经很完整的 Go 版 agent runtime”继续收成一个可长期运行、可部署、可观测、可扩展的产品。
+
+当前已经完成的主干包括：
+
+- 本地 CLI、REPL、TUI、单次执行
+- Anthropic provider 与主循环
+- 本地工具与权限策略
+- multi-agent、workflow、resume
+- MCP `stdio / http / sse / ws`
+- daemon、remote bridge、remote TUI
+- streaming turn
+- bearer auth
+
+接下来不再以“补一个大能力缺口”为主，而是进入稳定性、发布能力、治理能力和生态能力的持续收尾阶段。
+
+## P0 稳定性
+
+- [~] 端到端集成测试
+  - 覆盖 local / daemon / remote bridge / auth / streaming / workflow 的完整回归链路
+  - 当前状态：已开始
+- [ ] 并发与恢复压测
+  - 重点验证多 session、多 agent、workflow 重试、resume、stream 断连
+- [ ] daemon 生命周期收紧
+  - 优雅关闭、长连接中断、autosave 一致性、stream 断连收尾
+- [ ] 错误模型统一
+  - 统一 API status、可判别错误类型、用户可理解的错误输出
+
+## P1 发布能力
+
+- [~] CI 基础
+  - 自动运行格式检查和 `go test ./...`
+  - 当前状态：已开始
+- [ ] 版本化与发布
+  - `xxx-code version`
+  - release tag / binary / checksums
+  - `goreleaser`
+- [ ] 配置体系完善
+  - 配置文件、环境变量优先级、示例模板
+- [ ] 日志与诊断
+  - `--debug`
+  - request / session trace id
+  - daemon 日志级别
+
+## P1 Agent / Workflow 强化
+
+- [ ] workflow 查询与可视化增强
+  - 更强的汇总、过滤、失败诊断
+- [ ] 更细粒度恢复
+  - 单 task 重跑
+  - 从失败节点继续
+- [ ] remote / local 命令面对齐
+  - 继续收敛 REPL / TUI 能力差异
+- [ ] workflow artifact 约定
+  - 任务输出、结果索引、后续编排消费
+
+## P2 安全与治理
+
+- [ ] daemon 审计日志
+  - session、turn、tool、policy block、auth 失败记录
+- [ ] daemon ACL
+  - 不只是 bearer auth，还包括 session / tool / mode 级控制
+- [ ] token 轮换与部署建议
+  - 反向代理、TLS、最小暴露面
+- [ ] 速率限制与资源上限
+  - 避免单 client 打满整机
+
+## P2 生态与扩展
+
+- [ ] MCP 管理增强
+  - server health、重连、reload、配置校验
+- [ ] provider 扩展
+  - OpenAI / Azure / 本地模型
+- [ ] hooks 向事件总线演进
+  - 不只是 shell hook
+- [ ] tool / runtime 插件化
+  - 降低后续扩展成本
+
+## 执行顺序
+
+1. 补端到端集成测试与基础 CI
+2. 做并发 / 恢复压测与 daemon 生命周期收敛
+3. 完善版本化、发布和配置体系
+4. 强化 workflow 恢复、结果管理与查询能力
+5. 做审计、ACL、速率限制
+6. 扩 MCP 管理与 provider 生态
+
+## 当前阶段
+
+当前默认推进顺序：
+
+1. 先把测试与 CI 补厚，给后续迭代兜底
+2. 再继续做 daemon / workflow 的稳定性和治理能力
+3. 最后做发布与生态层扩展
+
+## 完成标准
+
+阶段性“可发布”标准：
+
+- `go test ./...` 稳定通过
+- 关键路径有端到端集成测试
+- daemon / remote / auth / streaming / workflow 有回归覆盖
+- 有基本 CI
+- 有明确版本、安装和运维说明
