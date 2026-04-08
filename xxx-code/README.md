@@ -12,7 +12,7 @@
 - 本地工具调用
 - 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
 - 主会话流式文本输出
-- REPL 与单次执行模式
+- REPL、TUI 与单次执行模式
 - HTTP daemon 与远程 session API
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
@@ -95,6 +95,20 @@ REPL 内支持：
 - `:save`
 - `:session`
 - `:quit`
+
+如果你更想用一个更像“终端应用”的界面，而不是逐行 REPL，也可以直接开 TUI：
+
+```bash
+go run ./cmd/xxx-code --tui
+```
+
+当前 TUI 提供：
+
+- 滚动 transcript 视图
+- 流式 assistant 输出
+- 底部输入框
+- 侧边栏 session / agent / workflow / MCP 状态
+- `Ctrl+S` 保存、`Ctrl+L` 清屏、`Ctrl+O` 开关侧边栏、`Ctrl+C` 退出
 
 ## 单次执行
 
@@ -518,10 +532,4 @@ MCP server 并不是旁路插件系统，而是启动时桥接进同一个 regis
 go test ./...
 ```
 
-## 现在还没做的
-
-这一版仍然刻意没有覆盖 TypeScript 版里特别重的产品层：
-
-- 更完整的流式 TUI / 富交互界面
-
-但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。
+现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期、远程 API 和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

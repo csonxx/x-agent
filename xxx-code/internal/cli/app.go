@@ -33,6 +33,7 @@ type App struct {
 	saveMu          sync.Mutex
 	streamMu        sync.Mutex
 	streaming       bool
+	tui             *terminalUI
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
@@ -129,6 +130,9 @@ func (a *App) Run(ctx context.Context) (runErr error) {
 			return err
 		}
 		return a.saveSession()
+	}
+	if a.config.TUI {
+		return a.runTUI(ctx)
 	}
 
 	return a.runREPL(ctx)
@@ -479,7 +483,11 @@ func (a *App) closeMCP() error {
 }
 
 func (a *App) handleEvent(event engine.Event) {
-	a.printEvent(event)
+	if a.tui != nil {
+		a.tui.handleEvent(event)
+	} else {
+		a.printEvent(event)
+	}
 	switch event.Kind {
 	case engine.EventAgentSpawned, engine.EventAgentCompleted, engine.EventAgentCancelled:
 		if err := a.saveSession(); err != nil {
@@ -550,4 +558,12 @@ func (a *App) printEvent(event engine.Event) {
 	case engine.EventHookError:
 		fmt.Fprintf(a.errOut, "hook error: %s\n", event.Text)
 	}
+}
+
+func (a *App) runPrompt(ctx context.Context, prompt string) (engine.RunResult, error) {
+	result, err := a.runner.RunTurn(ctx, a.session, prompt)
+	if err != nil {
+		return result, err
+	}
+	return result, a.saveSession()
 }

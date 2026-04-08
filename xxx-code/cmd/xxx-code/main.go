@@ -18,6 +18,10 @@ func main() {
 	}
 
 	if cfg.Daemon {
+		if cfg.TUI {
+			fmt.Fprintln(os.Stderr, "config error: --daemon cannot be combined with --tui")
+			os.Exit(1)
+		}
 		if cfg.Print {
 			fmt.Fprintln(os.Stderr, "config error: --daemon cannot be combined with --print or a direct prompt")
 			os.Exit(1)

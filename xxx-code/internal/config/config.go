@@ -54,6 +54,7 @@ type Config struct {
 	HookTimeout       time.Duration
 	Resume            bool
 	Print             bool
+	TUI               bool
 	Stream            bool
 	Verbose           bool
 	SystemPrompt      string
@@ -77,6 +78,7 @@ func Load() (Config, error) {
 	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")
 	flag.BoolVar(&cfg.BashEnabled, "bash", true, "Enable or disable the bash tool")
 	flag.BoolVar(&cfg.Print, "print", false, "Run once and exit")
+	flag.BoolVar(&cfg.TUI, "tui", false, "Run an interactive terminal UI instead of the line-oriented REPL")
 	flag.BoolVar(&cfg.Stream, "stream", true, "Stream assistant text as it is generated when the provider supports it")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Print tool and agent lifecycle events")
 	flag.BoolVar(&cfg.Resume, "resume", false, "Resume the main session and known agents from the session file")
