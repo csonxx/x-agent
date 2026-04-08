@@ -22,24 +22,26 @@ import (
 )
 
 type App struct {
-	config     config.Config
-	registry   *engine.Registry
-	runner     *engine.Runner
-	session    *engine.Session
-	mcpManager *mcpruntime.Manager
-	out        io.Writer
-	errOut     io.Writer
-	saveMu     sync.Mutex
-	streamMu   sync.Mutex
-	streaming  bool
+	config          config.Config
+	registry        *engine.Registry
+	runner          *engine.Runner
+	session         *engine.Session
+	workflowManager *tools.WorkflowManager
+	mcpManager      *mcpruntime.Manager
+	out             io.Writer
+	errOut          io.Writer
+	saveMu          sync.Mutex
+	streamMu        sync.Mutex
+	streaming       bool
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
 	app := &App{
-		config:  cfg,
-		session: engine.NewSession(),
-		out:     out,
-		errOut:  errOut,
+		config:          cfg,
+		session:         engine.NewSession(),
+		workflowManager: tools.NewWorkflowManager(),
+		out:             out,
+		errOut:          errOut,
 	}
 
 	registry := engine.NewRegistry(
@@ -50,11 +52,14 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		&tools.GlobTool{},
 		&tools.GrepTool{},
 		&tools.AgentSpawnTool{},
-		&tools.AgentFanoutTool{},
+		&tools.AgentFanoutTool{Manager: app.workflowManager},
 		&tools.AgentSendTool{},
 		&tools.AgentCancelTool{},
 		&tools.AgentWaitTool{},
 		&tools.AgentListTool{},
+		&tools.WorkflowListTool{Manager: app.workflowManager},
+		&tools.WorkflowGetTool{Manager: app.workflowManager},
+		&tools.WorkflowResumeTool{Manager: app.workflowManager},
 	)
 	app.registry = registry
 
@@ -85,6 +90,11 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 			AgentEvent: cfg.HookAgentEvent,
 		}),
 		EventHandler: app.handleEvent,
+	})
+	app.workflowManager.SetOnChange(func() {
+		if err := app.saveSession(); err != nil {
+			fmt.Fprintf(app.errOut, "autosave error: %v\n", err)
+		}
 	})
 
 	return app
@@ -172,6 +182,9 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":help                     show this help")
 		fmt.Fprintln(a.out, ":quit                     save and exit the REPL")
 		fmt.Fprintln(a.out, ":agents                   list spawned agents")
+		fmt.Fprintln(a.out, ":workflows                list persisted workflow summaries")
+		fmt.Fprintln(a.out, ":workflow <workflow-id>   print one persisted workflow snapshot")
+		fmt.Fprintln(a.out, ":workflow-resume <id>     resume an interrupted workflow")
 		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
 		fmt.Fprintln(a.out, ":mcp-resources [server]   list MCP resources")
 		fmt.Fprintln(a.out, ":mcp-prompts [server]     list MCP prompts")
@@ -183,7 +196,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":compact                  compact the main session immediately if it exceeds budget")
 		fmt.Fprintln(a.out, ":policy                   print active permission policy")
 		fmt.Fprintln(a.out, ":hooks                    print configured hook commands")
-		fmt.Fprintln(a.out, ":save                     persist the current main session and agents")
+		fmt.Fprintln(a.out, ":save                     persist the current main session, agents, and workflows")
 		fmt.Fprintln(a.out, ":session                  print session file information")
 		return false, nil
 	case ":agents":
@@ -191,6 +204,46 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		data, _ := json.MarshalIndent(snapshots, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
+	case ":workflows":
+		data, _ := json.MarshalIndent(a.workflowManager.ListWorkflows(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":workflow":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :workflow <workflow-id>")
+			return false, nil
+		}
+		snapshot, ok := a.workflowManager.GetWorkflow(fields[1])
+		if !ok {
+			fmt.Fprintf(a.errOut, "error: workflow not found: %s\n", fields[1])
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(snapshot, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":workflow-resume":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :workflow-resume <workflow-id>")
+			return false, nil
+		}
+		resumeCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		snapshot, results, agents, err := a.workflowManager.ResumeWorkflow(resumeCtx, fields[1], &engine.ExecutionContext{
+			Runner:     a.runner,
+			Session:    a.session,
+			WorkingDir: a.config.WorkingDir,
+		}, 0)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(map[string]any{
+			"workflow": snapshot,
+			"tasks":    results,
+			"agents":   agents,
+		}, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, a.saveSession()
 	case ":mcp":
 		statuses := []mcpruntime.ServerStatus{}
 		if a.mcpManager != nil {
@@ -349,6 +402,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintf(a.out, "context budget: %d\n", a.config.ContextBudget)
 		fmt.Fprintf(a.out, "max parallel agents: %d\n", a.config.MaxParallelAgents)
 		fmt.Fprintf(a.out, "agents: %d\n", len(a.runner.ListAgents()))
+		fmt.Fprintf(a.out, "workflows: %d\n", len(a.workflowManager.ListWorkflows()))
 		if a.mcpManager != nil {
 			fmt.Fprintf(a.out, "mcp config: %s\n", a.mcpManager.ConfigPath())
 			fmt.Fprintf(a.out, "mcp servers: %d\n", a.mcpManager.ServerCount())
@@ -372,13 +426,16 @@ func (a *App) resume() error {
 	if err := a.runner.ImportAgents(state.Agents); err != nil {
 		return fmt.Errorf("resume agents: %w", err)
 	}
+	if err := a.workflowManager.ImportWorkflows(state.Workflows); err != nil {
+		return fmt.Errorf("resume workflows: %w", err)
+	}
 	return nil
 }
 
 func (a *App) saveSession() error {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
-	return persist.Save(a.config.SessionFile, a.session, a.runner)
+	return persist.Save(a.config.SessionFile, a.session, a.runner, a.workflowManager)
 }
 
 func (a *App) initMCP(ctx context.Context) error {

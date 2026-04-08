@@ -204,7 +204,9 @@ type agentTaskInput struct {
 	WorkingDir     string   `json:"working_dir,omitempty"`
 }
 
-type AgentFanoutTool struct{}
+type AgentFanoutTool struct {
+	Manager *WorkflowManager
+}
 
 type agentFanoutInput struct {
 	Tasks                []agentTaskInput `json:"tasks"`
@@ -341,20 +343,63 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 			defer cancel()
 		}
 
-		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan, fanoutExecutionOptions{
+		workflowOptions := WorkflowOptions{
+			MaxParallel:          args.MaxParallel,
+			ResourceLimits:       cloneIntMap(resourceLimits),
+			FailFast:             args.FailFast,
+			PreemptLowerPriority: args.PreemptLowerPriority,
+			TimeoutSeconds:       args.TimeoutSeconds,
+		}
+		executionOptions := fanoutExecutionOptions{
 			maxParallel:          args.MaxParallel,
 			resourceLimits:       resourceLimits,
 			failFast:             args.FailFast,
 			preemptLowerPriority: args.PreemptLowerPriority,
-		})
+		}
+
+		var (
+			workflowSnapshot WorkflowSnapshot
+			stateChange      func([]*plannedFanoutTask)
+		)
+		if t.Manager != nil {
+			created, err := t.Manager.CreateWorkflow(execCtx.AgentID, plan, workflowOptions)
+			if err != nil {
+				return engine.ToolResult{}, err
+			}
+			workflowSnapshot = created
+			stateChange = func(current []*plannedFanoutTask) {
+				updated, updateErr := t.Manager.UpdateWorkflow(created.ID, WorkflowRunning, "", current, workflowOptions)
+				if updateErr == nil {
+					workflowSnapshot = updated
+				}
+			}
+		}
+
+		results, snapshots, err := executeFanoutPlan(waitCtx, execCtx, plan, executionOptions, stateChange)
 		if err != nil {
+			if t.Manager != nil && workflowSnapshot.ID != "" {
+				updated, updateErr := t.Manager.UpdateWorkflow(workflowSnapshot.ID, WorkflowInterrupted, err.Error(), plan, workflowOptions)
+				if updateErr == nil {
+					workflowSnapshot = updated
+				}
+			}
 			return engine.ToolResult{}, err
 		}
+		if t.Manager != nil && workflowSnapshot.ID != "" {
+			updated, updateErr := t.Manager.UpdateWorkflow(workflowSnapshot.ID, WorkflowCompleted, "", plan, workflowOptions)
+			if updateErr == nil {
+				workflowSnapshot = updated
+			}
+		}
+		payload := map[string]any{
+			"agents": snapshots,
+			"tasks":  results,
+		}
+		if workflowSnapshot.ID != "" {
+			payload["workflow"] = workflowSnapshot
+		}
 		return engine.ToolResult{
-			Content: mustJSON(map[string]any{
-				"agents": snapshots,
-				"tasks":  results,
-			}),
+			Content: mustJSON(payload),
 			IsError: hasFanoutTaskErrors(results),
 		}, nil
 	}
@@ -732,11 +777,16 @@ func validateFanoutPlanCycles(plan []*plannedFanoutTask) error {
 	return nil
 }
 
-func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, plan []*plannedFanoutTask, options fanoutExecutionOptions) ([]fanoutTaskResult, []engine.AgentSnapshot, error) {
+func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, plan []*plannedFanoutTask, options fanoutExecutionOptions, onPlanChange func([]*plannedFanoutTask)) ([]fanoutTaskResult, []engine.AgentSnapshot, error) {
 	active := make(map[string]int, len(plan))
 	activeResources := make(map[string]int)
 	resultsCh := make(chan fanoutWaitResult, len(plan))
 	failFastTriggered := false
+	notifyPlanChange := func() {
+		if onPlanChange != nil {
+			onPlanChange(plan)
+		}
+	}
 
 	triggerFailFast := func(taskName, status string) {
 		if !options.failFast || failFastTriggered {
@@ -745,6 +795,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 		failFastTriggered = true
 		cancelFanoutAgents(execCtx, active)
 		markPendingFanoutTasksSkipped(plan, fmt.Sprintf("skipped because fail_fast triggered by task %s with status %s", taskName, status))
+		notifyPlanChange()
 	}
 
 	launchReady := func(skipIndexes map[int]struct{}) error {
@@ -763,6 +814,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				item.done = true
 				item.result.Status = "skipped"
 				item.result.Error = fmt.Sprintf("skipped because dependency %s finished with status %s", failedDep, depStatus)
+				notifyPlanChange()
 				continue
 			}
 			if !dependenciesSatisfied(item, plan) {
@@ -772,6 +824,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				if options.preemptLowerPriority {
 					if victim := findPreemptibleFanoutTask(plan, active, item, blocked); victim != nil {
 						requestFanoutPreemption(execCtx, victim)
+						notifyPlanChange()
 					}
 				}
 				continue
@@ -781,6 +834,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				item.done = true
 				item.result.Status = string(engine.AgentFailed)
 				item.result.Error = err.Error()
+				notifyPlanChange()
 				triggerFailFast(item.key, item.result.Status)
 				continue
 			}
@@ -802,6 +856,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 				item.done = true
 				item.result.Status = string(engine.AgentFailed)
 				item.result.Error = err.Error()
+				notifyPlanChange()
 				continue
 			}
 
@@ -812,6 +867,7 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			item.result.Attempts = item.attempts
 			active[snapshot.ID] = item.index
 			incrementFanoutResource(activeResources, item.task.Resource)
+			notifyPlanChange()
 
 			go func(index, attempt int, agentID string, timeoutSeconds int) {
 				snapshot, timedOut, err := waitForFanoutTask(ctx, execCtx, agentID, timeoutSeconds)
@@ -831,12 +887,14 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 	if err := launchReady(nil); err != nil {
 		return nil, nil, err
 	}
+	notifyPlanChange()
 
 	for completedCount(plan) < len(plan) {
 		if len(active) == 0 {
 			if err := launchReady(nil); err != nil {
 				return nil, nil, err
 			}
+			notifyPlanChange()
 			if len(active) == 0 {
 				if completedCount(plan) == len(plan) {
 					break
@@ -867,10 +925,12 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			current.result.Attempts = item.attempt
 			if current.preemptRequested && !item.timedOut && item.snapshot.Status == engine.AgentCancelled {
 				resetFanoutTaskAfterPreemption(current)
+				notifyPlanChange()
 				if err := launchReady(map[int]struct{}{current.index: struct{}{}}); err != nil {
 					cancelFanoutAgents(execCtx, active)
 					return nil, nil, err
 				}
+				notifyPlanChange()
 				continue
 			}
 			if item.timedOut {
@@ -887,11 +947,13 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			} else if current.result.Status != string(engine.AgentIdle) {
 				triggerFailFast(current.key, current.result.Status)
 			}
+			notifyPlanChange()
 
 			if err := launchReady(nil); err != nil {
 				cancelFanoutAgents(execCtx, active)
 				return nil, nil, err
 			}
+			notifyPlanChange()
 		}
 	}
 

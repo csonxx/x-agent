@@ -15,8 +15,9 @@
 - REPL 与单次执行模式
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
+- workflow 的 `list / get / resume`
 - agent 并发上限、优先级与排队调度
-- transcript 持久化与 `resume`
+- transcript、workflow 状态持久化与 `resume`
 
 ## 目录结构
 
@@ -27,7 +28,7 @@ xxx-code/
   internal/config/           配置与参数
   internal/engine/           核心运行时、消息模型、主循环、agent 管理
   internal/mcp/              MCP 配置加载、stdio/http/sse client、动态 tool bridge
-  internal/persist/          session 与 agent 状态持久化
+  internal/persist/          session、agent 与 workflow 状态持久化
   internal/provider/         模型提供方适配
   internal/tools/            内建工具
 ```
@@ -46,6 +47,9 @@ xxx-code/
 - `agent_cancel`
 - `agent_wait`
 - `agent_list`
+- `workflow_list`
+- `workflow_get`
+- `workflow_resume`
 - `mcp__<server>__<tool>` 动态 MCP tools
 - `list_mcp_resources`
 - `list_mcp_resource_templates`
@@ -72,6 +76,9 @@ REPL 内支持：
 
 - `:help`
 - `:agents`
+- `:workflows`
+- `:workflow <workflow-id>`
+- `:workflow-resume <workflow-id>`
 - `:mcp`
 - `:mcp-resources [server]`
 - `:mcp-prompts [server]`
@@ -113,13 +120,27 @@ go run ./cmd/xxx-code --stream=false
 go run ./cmd/xxx-code --session-file /path/to/session.json
 ```
 
-恢复上一次主会话和已知子 agent：
+恢复上一次主会话、已知子 agent 和已保存 workflow：
 
 ```bash
 go run ./cmd/xxx-code --resume
 ```
 
 如果某个子 agent 在 session 保存时仍处于运行中，恢复后会被标记为失败，需要重新发送任务。这是当前实现为了保持状态一致性做的显式处理。
+
+如果某个 `agent_fanout` workflow 在保存时还没跑完，恢复后会被标记成 `interrupted`，unfinished task 会回到可恢复状态。你可以用：
+
+```text
+:workflows
+:workflow <workflow-id>
+:workflow-resume <workflow-id>
+```
+
+或者对应的工具：
+
+- `workflow_list`
+- `workflow_get`
+- `workflow_resume`
 
 ## 自动上下文压缩
 
@@ -344,6 +365,8 @@ go run ./cmd/xxx-code \
 
 如果你还希望高优先级任务能“插队”，可以加 `preempt_lower_priority=true`。这时高优先级 task 在被 `max_parallel` 或 `resource_limits` 挡住时，会尝试取消已经运行中的更低优先级 task，先让高优先级任务跑完；被抢占的低优先级 task 后面会重新排回去继续执行。执行结果里的 `tasks[].preemptions` 会记录它被抢占了多少次。
 
+带编排控制的 `agent_fanout` 现在还会返回一个 `workflow.id`。这个 workflow 会跟着 session 一起保存，所以如果中途退出，你可以在 `--resume` 之后继续查看或恢复，而不用手工重新拼整张 DAG。
+
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
 ## 常用参数
@@ -394,7 +417,7 @@ go run ./cmd/xxx-code \
 
 ### 3. 自动保存优先于“一次性脚本感”
 
-主会话在成功完成一轮后自动保存，子 agent 在 spawn / 完成时也会自动保存。这样即便是 REPL 模式，也更接近真正可持续协作的 agent，而不是临时命令行包装器。
+主会话在成功完成一轮后自动保存，子 agent 在 spawn / 完成时也会自动保存；workflow 状态变化时也会一起落盘。这样即便是 REPL 模式，也更接近真正可持续协作的 agent，而不是临时命令行包装器。
 
 ### 4. 长上下文管理不是完全交给外部模型
 
@@ -422,6 +445,5 @@ go test ./...
 - 更细粒度的权限系统
 - 远程 MCP transport 里的 `ws`
 - remote agent / bridge / daemon
-- 更复杂的 workflow 恢复
 
 但现在它已经不只是一个“会调几个工具的 Go CLI”，而是一个具备 session、agent 生命周期和可恢复状态的 Go agent runtime。后面你要拿它继续做 multi-agent 编排，会顺很多。

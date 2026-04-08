@@ -136,8 +136,9 @@ func (p *gatedWorkflowProvider) markStarted(prompt string) {
 }
 
 type fanoutResponse struct {
-	Agents []engine.AgentSnapshot `json:"agents"`
-	Tasks  []fanoutTaskPayload    `json:"tasks"`
+	Workflow WorkflowSnapshot       `json:"workflow"`
+	Agents   []engine.AgentSnapshot `json:"agents"`
+	Tasks    []fanoutTaskPayload    `json:"tasks"`
 }
 
 type fanoutTaskPayload struct {
@@ -1211,6 +1212,195 @@ func TestAgentFanoutToolPreemptsWithinSameResourcePool(t *testing.T) {
 		if byName["cpu_task"].Preemptions != 0 {
 			t.Fatalf("expected cpu task to avoid browser preemption, got %+v", byName["cpu_task"])
 		}
+	}
+}
+
+func TestWorkflowManagerImportInterruptsRunningWorkflow(t *testing.T) {
+	manager := NewWorkflowManager()
+	now := time.Now().UTC()
+	completed := now.Add(-time.Minute)
+
+	err := manager.ImportWorkflows([]WorkflowSnapshot{
+		{
+			ID:        "workflow_running",
+			Status:    WorkflowRunning,
+			CreatedAt: now.Add(-2 * time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Options: WorkflowOptions{
+				MaxParallel: 1,
+			},
+			Tasks: []WorkflowTaskState{
+				{
+					Input:    agentTaskInput{Name: "plan", Prompt: "plan work"},
+					Started:  true,
+					Attempts: 1,
+					AgentID:  "agent_plan",
+					Result: fanoutTaskResult{
+						Name:      "plan",
+						Prompt:    "plan work",
+						AgentID:   "agent_plan",
+						Attempts:  1,
+						Status:    string(engine.AgentRunning),
+						DependsOn: nil,
+					},
+					Snapshot: &engine.AgentSnapshot{
+						ID:        "agent_plan",
+						Name:      "plan",
+						Status:    engine.AgentRunning,
+						Prompt:    "plan work",
+						StartedAt: now.Add(-30 * time.Second),
+					},
+				},
+				{
+					Input:   agentTaskInput{Name: "done", Prompt: "done work"},
+					Done:    true,
+					AgentID: "agent_done",
+					Result: fanoutTaskResult{
+						Name:      "done",
+						Prompt:    "done work",
+						Status:    string(engine.AgentIdle),
+						Result:    "reply:done work",
+						AgentID:   "agent_done",
+						Attempts:  1,
+						DependsOn: nil,
+					},
+					Snapshot: &engine.AgentSnapshot{
+						ID:          "agent_done",
+						Name:        "done",
+						Status:      engine.AgentIdle,
+						Prompt:      "done work",
+						Result:      "reply:done work",
+						StartedAt:   now.Add(-2 * time.Minute),
+						CompletedAt: &completed,
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, ok := manager.GetWorkflow("workflow_running")
+	if !ok {
+		t.Fatal("expected imported workflow")
+	}
+	if snapshot.Status != WorkflowInterrupted {
+		t.Fatalf("expected interrupted workflow, got %+v", snapshot)
+	}
+	if snapshot.Tasks[0].Started {
+		t.Fatalf("expected running task to reset for resume, got %+v", snapshot.Tasks[0])
+	}
+	if snapshot.Tasks[0].AgentID != "" || snapshot.Tasks[0].Result.AgentID != "" {
+		t.Fatalf("expected running task agent ids to clear, got %+v", snapshot.Tasks[0])
+	}
+	if snapshot.Tasks[0].Attempts != 1 || snapshot.Tasks[0].Result.Attempts != 1 {
+		t.Fatalf("expected attempt count to be preserved, got %+v", snapshot.Tasks[0])
+	}
+	if !snapshot.Tasks[1].Done || snapshot.Tasks[1].Result.Status != string(engine.AgentIdle) {
+		t.Fatalf("expected completed task to stay completed, got %+v", snapshot.Tasks[1])
+	}
+}
+
+func TestWorkflowResumeToolResumesInterruptedWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	manager := NewWorkflowManager()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 1,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	fanoutTool := &AgentFanoutTool{Manager: manager}
+	runCtx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":         true,
+			"max_parallel": 1,
+			"tasks": []map[string]any{
+				{"name": "one", "prompt": "one"},
+				{"name": "two", "prompt": "two"},
+			},
+		})
+		_, err := fanoutTool.Call(runCtx, execCtx, input)
+		errCh <- err
+	}()
+
+	select {
+	case <-provider.startedChan("one"):
+	case <-time.After(2 * time.Second):
+		t.Fatal("first task did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected workflow cancellation, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("workflow did not stop after cancellation")
+	}
+
+	exported := manager.ExportWorkflows()
+	if len(exported) != 1 {
+		t.Fatalf("expected one exported workflow, got %d", len(exported))
+	}
+	if exported[0].Status != WorkflowInterrupted {
+		t.Fatalf("expected interrupted export, got %+v", exported[0])
+	}
+
+	resumeManager := NewWorkflowManager()
+	if err := resumeManager.ImportWorkflows(exported); err != nil {
+		t.Fatal(err)
+	}
+	resumeRunner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 1,
+	})
+	resumeTool := &WorkflowResumeTool{Manager: resumeManager}
+
+	input, _ := json.Marshal(map[string]any{
+		"workflow_id": exported[0].ID,
+	})
+	result, err := resumeTool.Call(context.Background(), &engine.ExecutionContext{
+		Runner:     resumeRunner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected resumed workflow success, got %s", result.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Workflow.Status != WorkflowCompleted {
+		t.Fatalf("expected completed workflow, got %+v", payload.Workflow)
+	}
+	byName := mapFanoutTasks(payload.Tasks)
+	if byName["one"].Status != string(engine.AgentIdle) || byName["two"].Status != string(engine.AgentIdle) {
+		t.Fatalf("expected resumed tasks to finish successfully, got %+v", byName)
+	}
+	if byName["one"].Attempts != 2 {
+		t.Fatalf("expected resumed first task to preserve and increment attempts, got %+v", byName["one"])
 	}
 }
 
