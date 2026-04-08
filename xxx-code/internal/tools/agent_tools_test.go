@@ -43,6 +43,37 @@ func (p *conditionalToolPromptProvider) CreateMessage(ctx context.Context, reque
 	}, nil
 }
 
+type flakyWorkflowProvider struct {
+	mu       sync.Mutex
+	failures map[string]int
+	attempts map[string]int
+}
+
+func newFlakyWorkflowProvider(failures map[string]int) *flakyWorkflowProvider {
+	return &flakyWorkflowProvider{
+		failures: failures,
+		attempts: make(map[string]int),
+	}
+}
+
+func (p *flakyWorkflowProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	text := latestToolUserText(request.Messages)
+
+	p.mu.Lock()
+	p.attempts[text]++
+	attempt := p.attempts[text]
+	limit := p.failures[text]
+	p.mu.Unlock()
+
+	if attempt <= limit {
+		return engine.CompletionResponse{}, errors.New("forced retry failure: " + text)
+	}
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+text),
+	}, nil
+}
+
 type gatedWorkflowProvider struct {
 	mu      sync.Mutex
 	started map[string]chan struct{}
@@ -115,6 +146,9 @@ type fanoutTaskPayload struct {
 	Prompt         string   `json:"prompt"`
 	ResolvedPrompt string   `json:"resolved_prompt"`
 	DependsOn      []string `json:"depends_on"`
+	Retries        int      `json:"retries"`
+	Attempts       int      `json:"attempts"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
 	AgentID        string   `json:"agent_id"`
 	Result         string   `json:"result"`
 	Error          string   `json:"error"`
@@ -681,6 +715,215 @@ func TestAgentFanoutToolFailFastCancelsActiveTasks(t *testing.T) {
 	case <-laterStarted:
 		t.Fatal("later task started despite fail_fast")
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestAgentFanoutToolRetriesFailedTaskUntilSuccess(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(newFlakyWorkflowProvider(map[string]int{
+		"flaky work": 1,
+	}), engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "flaky", "prompt": "flaky work", "retries": 1},
+		},
+	})
+
+	result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected retried workflow to succeed, got %s", result.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	byName := mapFanoutTasks(payload.Tasks)
+	if byName["flaky"].Status != "idle" {
+		t.Fatalf("expected flaky task to recover after retry, got %+v", byName["flaky"])
+	}
+	if byName["flaky"].Attempts != 2 {
+		t.Fatalf("expected two attempts, got %+v", byName["flaky"])
+	}
+}
+
+func TestAgentFanoutToolRetriesTimedOutTask(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait": true,
+			"tasks": []map[string]any{
+				{"name": "slow", "prompt": "slow retry", "timeout_seconds": 1, "retries": 1},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	started := provider.startedChan("slow retry")
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first attempt did not start")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second attempt did not start after timeout retry")
+	}
+	close(provider.releaseChan("slow retry"))
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if result.IsError {
+			t.Fatalf("expected timeout retry workflow to succeed, got %s", result.Content)
+		}
+		var payload fanoutResponse
+		if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+			t.Fatal(err)
+		}
+		byName := mapFanoutTasks(payload.Tasks)
+		if byName["slow"].Status != "idle" {
+			t.Fatalf("expected timed out task to recover, got %+v", byName["slow"])
+		}
+		if byName["slow"].Attempts != 2 {
+			t.Fatalf("expected timed out task to use two attempts, got %+v", byName["slow"])
+		}
+	}
+}
+
+func TestAgentFanoutToolFailFastWaitsForRetriesToExhaust(t *testing.T) {
+	dir := t.TempDir()
+	provider := newGatedWorkflowProvider()
+	runner := engine.NewRunner(provider, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 3,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	resultCh := make(chan engine.ToolResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, _ := json.Marshal(map[string]any{
+			"wait":         true,
+			"fail_fast":    true,
+			"max_parallel": 2,
+			"tasks": []map[string]any{
+				{"name": "fast", "prompt": "fast fail", "retries": 1},
+				{"name": "slow", "prompt": "slow guarded"},
+				{"name": "later", "prompt": "later guarded"},
+			},
+		})
+		result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	fastStarted := provider.startedChan("fast fail")
+	slowStarted := provider.startedChan("slow guarded")
+	laterStarted := provider.startedChan("later guarded")
+
+	select {
+	case <-fastStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast task did not start")
+	}
+	select {
+	case <-slowStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow task did not start")
+	}
+
+	close(provider.releaseChan("fast fail"))
+
+	select {
+	case <-fastStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast task did not retry before fail_fast triggered")
+	}
+
+	select {
+	case <-laterStarted:
+		t.Fatal("later task started before fast retries were exhausted")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case result := <-resultCh:
+		if !result.IsError {
+			t.Fatalf("expected fail_fast workflow to return error result, got %s", result.Content)
+		}
+		var payload fanoutResponse
+		if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+			t.Fatal(err)
+		}
+		byName := mapFanoutTasks(payload.Tasks)
+		if byName["fast"].Status != "failed" {
+			t.Fatalf("expected fast task to end failed, got %+v", byName["fast"])
+		}
+		if byName["fast"].Attempts != 2 {
+			t.Fatalf("expected fast task to exhaust retries, got %+v", byName["fast"])
+		}
+		if byName["slow"].Status != "cancelled" {
+			t.Fatalf("expected slow task to be cancelled after fail_fast, got %+v", byName["slow"])
+		}
+		if byName["later"].Status != "skipped" {
+			t.Fatalf("expected later task to be skipped after fail_fast, got %+v", byName["later"])
+		}
 	}
 }
 

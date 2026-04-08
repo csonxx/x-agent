@@ -303,8 +303,8 @@ go run ./cmd/xxx-code \
   "max_parallel": 2,
   "fail_fast": true,
   "tasks": [
-    {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4},
-    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8},
+    {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4, "retries": 1},
+    {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8, "timeout_seconds": 30},
     {
       "name": "writer",
       "prompt": "基于 {{tasks.reader.result}} 和 {{tasks.tester.result}} 输出结论",
@@ -330,6 +330,13 @@ go run ./cmd/xxx-code \
 
 - 已经启动的 sibling task 会被取消，状态变成 `cancelled`
 - 还没启动的 sibling task 会被标记成 `skipped`
+
+每个 task 还支持两组更偏执行层的控制：
+
+- `retries`: 失败、取消或超时后自动重试的次数
+- `timeout_seconds`: 单任务超时，超时后对应 agent 会被取消，task 状态记成 `timed_out`
+
+`fail_fast` 会等某个任务把自己的重试次数耗尽后再真正触发，所以它和 `retries` 可以组合使用。带这些执行控制的 workflow 同样要求 `wait=true`，因为需要由编排器负责调度和回收。
 
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
