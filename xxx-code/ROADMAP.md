@@ -32,19 +32,17 @@
 
 ## P1 发布能力
 
-- [~] CI 基础
-  - 自动运行格式检查和 `go test ./...`
-  - 当前状态：已开始
-- [ ] 版本化与发布
-  - `xxx-code version`
-  - release tag / binary / checksums
-  - `goreleaser`
-- [ ] 配置体系完善
-  - 配置文件、环境变量优先级、示例模板
-- [ ] 日志与诊断
-  - `--debug`
-  - request / session trace id
-  - daemon 日志级别
+- [x] CI 基础
+  - 已补 `gofmt`、`go test ./...`、`go test -race ./...`、`--version` 回归
+- [x] 版本化与发布
+  - 已补 `xxx-code version` / `--version`
+  - 已补 GoReleaser 配置、release workflow、checksums
+- [x] 配置体系完善
+  - 已补 `.xxx-code/config.json` 自动发现、`--config`、示例模板
+  - 已明确 flags > env > config file > defaults
+- [x] 日志与诊断
+  - 已补 `--log-level`、`--debug`、`--log-file`
+  - 已补 daemon trace id 与请求日志
 
 ## P1 Agent / Workflow 强化
 

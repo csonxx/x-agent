@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 )
 
@@ -22,6 +23,7 @@ type App struct {
 	errOut    io.Writer
 	sessionID string
 	streaming bool
+	logger    *diag.Logger
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
@@ -36,10 +38,12 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		client: NewClient(cfg.RemoteURL, cfg.RemoteToken, nil),
 		out:    out,
 		errOut: errOut,
+		logger: diag.New(errOut, cfg.LogLevel),
 	}
 }
 
 func (a *App) Run(ctx context.Context) error {
+	a.logger.Debugf("starting remote app url=%s session=%s print=%t tui=%t config=%s", a.config.RemoteURL, a.config.RemoteSession, a.config.Print, a.config.TUI, a.config.ConfigFile)
 	if strings.TrimSpace(a.config.RemoteURL) == "" {
 		return fmt.Errorf("--remote-url is required")
 	}
@@ -54,6 +58,7 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	a.sessionID = session.ID
+	a.logger.Debugf("connected to remote session id=%s", a.sessionID)
 
 	if a.config.Print {
 		if strings.TrimSpace(a.config.Prompt) == "" {

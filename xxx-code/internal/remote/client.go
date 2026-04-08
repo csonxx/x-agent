@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
@@ -230,6 +231,7 @@ func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeo
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	c.applyAuth(req)
+	req.Header.Set(diag.TraceHeader, diag.NewTraceID())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -488,6 +490,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody an
 		req.Header.Set("Content-Type", "application/json")
 	}
 	c.applyAuth(req)
+	req.Header.Set(diag.TraceHeader, diag.NewTraceID())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

@@ -1,0 +1,19 @@
+{
+  "model": "claude-sonnet-4-5",
+  "cwd": ".",
+  "session_file": ".xxx-code/session.json",
+  "daemon_dir": ".xxx-code/daemon",
+  "mcp_config": ".mcp.json",
+  "allow_read": [
+    "."
+  ],
+  "allow_write": [
+    "."
+  ],
+  "stream": true,
+  "verbose": false,
+  "log_level": "info",
+  "log_file": ".xxx-code/xxx-code.log",
+  "tool_timeout": "2m",
+  "hook_timeout": "30s"
+}

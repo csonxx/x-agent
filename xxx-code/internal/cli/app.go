@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
@@ -34,6 +35,7 @@ type App struct {
 	streamMu        sync.Mutex
 	streaming       bool
 	tui             *terminalUI
+	logger          *diag.Logger
 }
 
 func New(cfg config.Config, out, errOut io.Writer) *App {
@@ -43,6 +45,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 		workflowManager: tools.NewWorkflowManager(),
 		out:             out,
 		errOut:          errOut,
+		logger:          diag.New(errOut, cfg.LogLevel),
 	}
 
 	registry := engine.NewRegistry(
@@ -106,6 +109,7 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 }
 
 func (a *App) Run(ctx context.Context) (runErr error) {
+	a.logger.Debugf("starting local app mode print=%t tui=%t resume=%t cwd=%s session=%s config=%s", a.config.Print, a.config.TUI, a.config.Resume, a.config.WorkingDir, a.config.SessionFile, a.config.ConfigFile)
 	if err := a.initMCP(ctx); err != nil {
 		return err
 	}
@@ -129,6 +133,7 @@ func (a *App) Run(ctx context.Context) (runErr error) {
 		if _, err := a.runner.RunTurn(ctx, a.session, a.config.Prompt); err != nil {
 			return err
 		}
+		a.logger.Debugf("completed one-shot run session=%s", a.config.SessionFile)
 		return a.saveSession()
 	}
 	if a.config.TUI {
@@ -143,6 +148,7 @@ func (a *App) runREPL(ctx context.Context) error {
 	fmt.Fprintln(a.out, "Type :help for commands, :quit to exit.")
 	if a.config.Resume {
 		fmt.Fprintf(a.errOut, "resumed session from %s\n", a.config.SessionFile)
+		a.logger.Debugf("resumed session from %s", a.config.SessionFile)
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -443,7 +449,11 @@ func (a *App) resume() error {
 func (a *App) saveSession() error {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
-	return persist.Save(a.config.SessionFile, a.session, a.runner, a.workflowManager)
+	err := persist.Save(a.config.SessionFile, a.session, a.runner, a.workflowManager)
+	if err == nil {
+		a.logger.Debugf("saved session file=%s messages=%d agents=%d workflows=%d", a.config.SessionFile, len(a.session.Snapshot()), len(a.runner.ListAgents()), len(a.workflowManager.ListWorkflows()))
+	}
+	return err
 }
 
 func (a *App) initMCP(ctx context.Context) error {

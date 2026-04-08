@@ -19,6 +19,10 @@
 - workflow 的 `list / get / resume`
 - agent 并发上限、优先级与排队调度
 - transcript、workflow 状态持久化与 `resume`
+- `version` / build metadata
+- GoReleaser 发布配置与 GitHub release workflow
+- config file、env、flags 的优先级配置体系
+- trace id、request logging 与 `--log-file` 诊断输出
 
 ## 目录结构
 
@@ -67,6 +71,71 @@ xxx-code/
 ```bash
 export ANTHROPIC_API_KEY=...
 ```
+
+## 版本信息
+
+查看当前二进制的构建信息：
+
+```bash
+go run ./cmd/xxx-code --version
+```
+
+或者：
+
+```bash
+go run ./cmd/xxx-code version
+```
+
+发布产物会通过 ldflags 注入：
+
+- version
+- commit
+- build date
+- built by
+- go version / platform
+
+## 配置优先级
+
+`xxx-code` 现在支持 4 层配置来源，优先级从低到高是：
+
+1. 内建默认值
+2. config file
+3. environment variables
+4. CLI flags
+
+默认会自动发现：
+
+```text
+.xxx-code/config.json
+```
+
+也可以显式指定：
+
+```bash
+go run ./cmd/xxx-code --config /path/to/config.json
+```
+
+仓库里放了一份可直接改的模板：
+
+- [examples/config.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/config.json)
+
+比较常用的环境变量有：
+
+- `ANTHROPIC_API_KEY`
+- `XXX_CODE_MODEL`
+- `XXX_CODE_REMOTE_URL`
+- `XXX_CODE_REMOTE_TOKEN`
+- `XXX_CODE_DAEMON_TOKEN`
+- `XXX_CODE_LOG_LEVEL`
+- `XXX_CODE_LOG_FILE`
+- `XXX_CODE_CONFIG`
+
+比较常用的诊断 flag 有：
+
+- `--log-level info|debug|error`
+- `--debug`
+- `--log-file .xxx-code/xxx-code.log`
+- `--config .xxx-code/config.json`
 
 ## 交互模式
 
@@ -213,6 +282,18 @@ curl -N http://127.0.0.1:7331/v1/sessions/<id>/turns/stream \
   -d '{"prompt":"分析当前目录代码结构"}'
 ```
 
+daemon 现在会为每个请求生成或透传：
+
+- `X-Trace-ID`
+
+打开 `--log-level=debug` 后，请求日志里会带上：
+
+- trace id
+- method / path
+- status
+- duration
+- remote addr
+
 ## Remote Bridge 模式
 
 如果 daemon 已经跑起来，本地这个 CLI 也可以直接把它当成“远程后端”来用，而不是自己再起一个本地 provider/runtime：
@@ -257,6 +338,42 @@ go run ./cmd/xxx-code \
   --remote-session repo-main \
   --print "分析当前目录代码结构"
 ```
+
+## 诊断日志
+
+如果你想把 stderr 和调试日志一起持久化到文件：
+
+```bash
+go run ./cmd/xxx-code \
+  --log-level debug \
+  --log-file .xxx-code/xxx-code.log
+```
+
+daemon 模式也一样：
+
+```bash
+go run ./cmd/xxx-code \
+  --daemon \
+  --listen 127.0.0.1:7331 \
+  --log-level debug \
+  --log-file .xxx-code/daemon.log
+```
+
+## 发布
+
+本仓库已经补了：
+
+- [/.goreleaser.yml](/Users/tt/goworkspace/src/x-agent/.goreleaser.yml)
+- [xxx-code-release.yml](/Users/tt/goworkspace/src/x-agent/.github/workflows/xxx-code-release.yml)
+
+CI 会跑：
+
+- `gofmt`
+- `go test ./...`
+- `go test -race ./...`
+- `go run ./cmd/xxx-code --version`
+
+release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和 `checksums.txt`。
 
 远程 REPL 当前支持这些命令：
 

@@ -1,12 +1,18 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 )
 
 const defaultSystemPrompt = `You are xxx-code, a Go-built coding agent inspired by Claude Code.
@@ -62,94 +68,210 @@ type Config struct {
 	TUI               bool
 	Stream            bool
 	Verbose           bool
+	LogLevel          diag.Level
+	LogFile           string
+	ConfigFile        string
+	ShowVersion       bool
 	SystemPrompt      string
 	ToolTimeout       time.Duration
 	Prompt            string
 }
 
+type fileConfig struct {
+	APIKey            *string  `json:"api_key,omitempty"`
+	BaseURL           *string  `json:"base_url,omitempty"`
+	AnthropicVersion  *string  `json:"anthropic_version,omitempty"`
+	Model             *string  `json:"model,omitempty"`
+	MaxTurns          *int     `json:"max_turns,omitempty"`
+	MaxTokens         *int     `json:"max_tokens,omitempty"`
+	MaxParallelAgents *int     `json:"max_parallel_agents,omitempty"`
+	ContextBudget     *int     `json:"context_budget,omitempty"`
+	CompactKeep       *int     `json:"compact_keep,omitempty"`
+	Daemon            *bool    `json:"daemon,omitempty"`
+	Listen            *string  `json:"listen,omitempty"`
+	DaemonToken       *string  `json:"daemon_token,omitempty"`
+	DaemonDir         *string  `json:"daemon_dir,omitempty"`
+	RemoteURL         *string  `json:"remote_url,omitempty"`
+	RemoteToken       *string  `json:"remote_token,omitempty"`
+	RemoteSession     *string  `json:"remote_session,omitempty"`
+	RemoteList        *bool    `json:"remote_list_sessions,omitempty"`
+	WorkingDir        *string  `json:"cwd,omitempty"`
+	SessionFile       *string  `json:"session_file,omitempty"`
+	MCPConfigFile     *string  `json:"mcp_config,omitempty"`
+	AllowRead         []string `json:"allow_read,omitempty"`
+	AllowWrite        []string `json:"allow_write,omitempty"`
+	AllowTools        []string `json:"allow_tools,omitempty"`
+	DenyTools         []string `json:"deny_tools,omitempty"`
+	AllowBashPrefix   []string `json:"allow_bash_prefix,omitempty"`
+	DenyBashPrefix    []string `json:"deny_bash_prefix,omitempty"`
+	ReadOnly          *bool    `json:"read_only,omitempty"`
+	BashEnabled       *bool    `json:"bash,omitempty"`
+	HookBeforeTool    *string  `json:"hook_before_tool,omitempty"`
+	HookAfterTool     *string  `json:"hook_after_tool,omitempty"`
+	HookAfterTurn     *string  `json:"hook_after_turn,omitempty"`
+	HookAgentEvent    *string  `json:"hook_agent_event,omitempty"`
+	HookTimeout       *string  `json:"hook_timeout,omitempty"`
+	ToolTimeout       *string  `json:"tool_timeout,omitempty"`
+	Resume            *bool    `json:"resume,omitempty"`
+	Print             *bool    `json:"print,omitempty"`
+	TUI               *bool    `json:"tui,omitempty"`
+	Stream            *bool    `json:"stream,omitempty"`
+	Verbose           *bool    `json:"verbose,omitempty"`
+	Debug             *bool    `json:"debug,omitempty"`
+	LogLevel          *string  `json:"log_level,omitempty"`
+	LogFile           *string  `json:"log_file,omitempty"`
+	SystemPrompt      *string  `json:"system_prompt,omitempty"`
+	SystemPromptFile  *string  `json:"system_prompt_file,omitempty"`
+	Prompt            *string  `json:"prompt,omitempty"`
+}
+
+type rawOptions struct {
+	workingDir       string
+	sessionFile      string
+	daemonDir        string
+	mcpConfigFile    string
+	systemPromptFile string
+	readRoots        []string
+	writeRoots       []string
+	allowedTools     []string
+	blockedTools     []string
+	bashAllow        []string
+	bashDeny         []string
+}
+
 func Load() (Config, error) {
-	cfg := Config{}
+	wd, err := os.Getwd()
+	if err != nil {
+		return Config{}, err
+	}
+	return LoadArgs(os.Args[1:], os.LookupEnv, wd)
+}
 
-	flag.StringVar(&cfg.Model, "model", firstNonEmpty(os.Getenv("XXX_CODE_MODEL"), "claude-sonnet-4-5"), "Anthropic model to use")
-	flag.StringVar(&cfg.BaseURL, "base-url", firstNonEmpty(os.Getenv("ANTHROPIC_BASE_URL"), "https://api.anthropic.com"), "Anthropic API base URL")
-	flag.StringVar(&cfg.Version, "anthropic-version", firstNonEmpty(os.Getenv("ANTHROPIC_VERSION"), "2023-06-01"), "Anthropic API version header")
-	flag.IntVar(&cfg.MaxTurns, "max-turns", 12, "Maximum agentic turns per user prompt")
-	flag.IntVar(&cfg.MaxTokens, "max-tokens", 16384, "Max output tokens per model request")
-	flag.IntVar(&cfg.MaxParallelAgents, "max-parallel-agents", 4, "Maximum number of sub-agents that can run concurrently")
-	flag.IntVar(&cfg.ContextBudget, "context-budget", 120000, "Approximate context token budget before automatic compaction; set 0 to disable")
-	flag.IntVar(&cfg.CompactKeep, "compact-keep", 12, "How many latest messages to keep verbatim during automatic compaction")
-	flag.BoolVar(&cfg.Daemon, "daemon", false, "Run xxx-code as a persistent HTTP daemon")
-	flag.StringVar(&cfg.DaemonListenAddr, "listen", firstNonEmpty(os.Getenv("XXX_CODE_LISTEN"), "127.0.0.1:7331"), "Listen address for daemon mode")
-	flag.StringVar(&cfg.DaemonToken, "daemon-token", strings.TrimSpace(os.Getenv("XXX_CODE_DAEMON_TOKEN")), "Optional bearer token required by the daemon for /v1/* requests")
-	flag.StringVar(&cfg.RemoteURL, "remote-url", strings.TrimSpace(os.Getenv("XXX_CODE_REMOTE_URL")), "Daemon base URL to use as a remote bridge")
-	flag.StringVar(&cfg.RemoteToken, "remote-token", strings.TrimSpace(os.Getenv("XXX_CODE_REMOTE_TOKEN")), "Bearer token to send when connecting to a protected daemon")
-	flag.StringVar(&cfg.RemoteSession, "remote-session", "", "Remote daemon session ID to open or create")
-	flag.BoolVar(&cfg.RemoteList, "remote-list-sessions", false, "List daemon sessions instead of running a local session")
-	flag.BoolVar(&cfg.ReadOnly, "read-only", false, "Disable write_file and edit_file tool writes")
-	flag.BoolVar(&cfg.BashEnabled, "bash", true, "Enable or disable the bash tool")
-	flag.BoolVar(&cfg.Print, "print", false, "Run once and exit")
-	flag.BoolVar(&cfg.TUI, "tui", false, "Run an interactive terminal UI instead of the line-oriented REPL")
-	flag.BoolVar(&cfg.Stream, "stream", true, "Stream assistant text as it is generated when the provider supports it")
-	flag.BoolVar(&cfg.Verbose, "verbose", false, "Print tool and agent lifecycle events")
-	flag.BoolVar(&cfg.Resume, "resume", false, "Resume the main session and known agents from the session file")
-	flag.DurationVar(&cfg.ToolTimeout, "tool-timeout", 2*time.Minute, "Per-tool execution timeout")
-	flag.DurationVar(&cfg.HookTimeout, "hook-timeout", 30*time.Second, "Timeout for each configured hook command")
+func LoadArgs(args []string, lookup func(string) (string, bool), currentWD string) (Config, error) {
+	if lookup == nil {
+		lookup = func(string) (string, bool) { return "", false }
+	}
+	currentWD = filepath.Clean(currentWD)
 
-	systemPromptFile := flag.String("system-prompt-file", "", "Read the system prompt from a file")
-	cwdFlag := flag.String("cwd", "", "Working directory")
-	sessionFileFlag := flag.String("session-file", "", "Path to the persisted session file")
-	daemonDirFlag := flag.String("daemon-dir", "", "Directory for daemon-managed remote sessions")
-	mcpConfigFlag := flag.String("mcp-config", strings.TrimSpace(os.Getenv("XXX_CODE_MCP_CONFIG")), "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
-	readRootsFlag := flag.String("allow-read", "", "Comma-separated read roots; the working directory is always included")
-	writeRootsFlag := flag.String("allow-write", "", "Comma-separated write roots; the working directory is always included unless --read-only is set")
-	allowToolsFlag := flag.String("allow-tools", "", "Comma-separated tool allowlist; when set, only these tools may run")
-	denyToolsFlag := flag.String("deny-tools", "", "Comma-separated tool denylist")
-	allowBashPrefixFlag := flag.String("allow-bash-prefix", "", "Comma-separated allowed bash command prefixes")
-	denyBashPrefixFlag := flag.String("deny-bash-prefix", "", "Comma-separated blocked bash command prefixes")
-	hookBeforeToolFlag := flag.String("hook-before-tool", "", "Shell command to run before each tool call; non-zero exit blocks the tool")
-	hookAfterToolFlag := flag.String("hook-after-tool", "", "Shell command to run after each tool call")
-	hookAfterTurnFlag := flag.String("hook-after-turn", "", "Shell command to run after each turn")
-	hookAgentEventFlag := flag.String("hook-agent-event", "", "Shell command to run for agent lifecycle events")
-
-	flag.Parse()
-
-	cfg.APIKey = strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY"))
-	if cfg.APIKey == "" && (cfg.Daemon || strings.TrimSpace(cfg.RemoteURL) == "") {
-		return Config{}, fmt.Errorf("ANTHROPIC_API_KEY is required")
+	cfg := defaultConfig()
+	raw := rawOptions{
+		workingDir: currentWD,
 	}
 
-	if *cwdFlag != "" {
-		cfg.WorkingDir = *cwdFlag
-	} else {
-		wd, err := os.Getwd()
+	if versionMode(args) {
+		cfg.ShowVersion = true
+		return cfg, nil
+	}
+
+	bootstrapWD := currentWD
+	if cwdValue, ok := findStringFlag(args, "cwd"); ok && strings.TrimSpace(cwdValue) != "" {
+		bootstrapWD = resolvePath(currentWD, cwdValue)
+	}
+
+	configPath, err := resolveConfigPath(args, lookup, bootstrapWD)
+	if err != nil {
+		return Config{}, err
+	}
+	if configPath != "" {
+		fileCfg, err := loadFileConfig(configPath)
 		if err != nil {
 			return Config{}, err
 		}
-		cfg.WorkingDir = wd
+		cfg.ConfigFile = configPath
+		applyFileConfig(&cfg, &raw, fileCfg, filepath.Dir(configPath))
 	}
-	cfg.WorkingDir = filepath.Clean(cfg.WorkingDir)
 
-	if *sessionFileFlag != "" {
-		if filepath.IsAbs(*sessionFileFlag) {
-			cfg.SessionFile = filepath.Clean(*sessionFileFlag)
-		} else {
-			cfg.SessionFile = filepath.Join(cfg.WorkingDir, *sessionFileFlag)
+	if err := applyEnvConfig(&cfg, &raw, lookup); err != nil {
+		return Config{}, err
+	}
+
+	fs := flag.NewFlagSet("xxx-code", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	logLevelValue := cfg.LogLevel.String()
+	debugDefault := cfg.LogLevel == diag.LevelDebug
+
+	fs.StringVar(&cfg.Model, "model", cfg.Model, "Anthropic model to use")
+	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL, "Anthropic API base URL")
+	fs.StringVar(&cfg.Version, "anthropic-version", cfg.Version, "Anthropic API version header")
+	fs.IntVar(&cfg.MaxTurns, "max-turns", cfg.MaxTurns, "Maximum agentic turns per user prompt")
+	fs.IntVar(&cfg.MaxTokens, "max-tokens", cfg.MaxTokens, "Max output tokens per model request")
+	fs.IntVar(&cfg.MaxParallelAgents, "max-parallel-agents", cfg.MaxParallelAgents, "Maximum number of sub-agents that can run concurrently")
+	fs.IntVar(&cfg.ContextBudget, "context-budget", cfg.ContextBudget, "Approximate context token budget before automatic compaction; set 0 to disable")
+	fs.IntVar(&cfg.CompactKeep, "compact-keep", cfg.CompactKeep, "How many latest messages to keep verbatim during automatic compaction")
+	fs.BoolVar(&cfg.Daemon, "daemon", cfg.Daemon, "Run xxx-code as a persistent HTTP daemon")
+	fs.StringVar(&cfg.DaemonListenAddr, "listen", cfg.DaemonListenAddr, "Listen address for daemon mode")
+	fs.StringVar(&cfg.DaemonToken, "daemon-token", cfg.DaemonToken, "Optional bearer token required by the daemon for /v1/* requests")
+	fs.StringVar(&cfg.RemoteURL, "remote-url", cfg.RemoteURL, "Daemon base URL to use as a remote bridge")
+	fs.StringVar(&cfg.RemoteToken, "remote-token", cfg.RemoteToken, "Bearer token to send when connecting to a protected daemon")
+	fs.StringVar(&cfg.RemoteSession, "remote-session", cfg.RemoteSession, "Remote daemon session ID to open or create")
+	fs.BoolVar(&cfg.RemoteList, "remote-list-sessions", cfg.RemoteList, "List daemon sessions instead of running a local session")
+	fs.BoolVar(&cfg.ReadOnly, "read-only", cfg.ReadOnly, "Disable write_file and edit_file tool writes")
+	fs.BoolVar(&cfg.BashEnabled, "bash", cfg.BashEnabled, "Enable or disable the bash tool")
+	fs.BoolVar(&cfg.Print, "print", cfg.Print, "Run once and exit")
+	fs.BoolVar(&cfg.TUI, "tui", cfg.TUI, "Run an interactive terminal UI instead of the line-oriented REPL")
+	fs.BoolVar(&cfg.Stream, "stream", cfg.Stream, "Stream assistant text as it is generated when the provider supports it")
+	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "Print tool and agent lifecycle events")
+	fs.BoolVar(&cfg.Resume, "resume", cfg.Resume, "Resume the main session and known agents from the session file")
+	fs.DurationVar(&cfg.ToolTimeout, "tool-timeout", cfg.ToolTimeout, "Per-tool execution timeout")
+	fs.DurationVar(&cfg.HookTimeout, "hook-timeout", cfg.HookTimeout, "Timeout for each configured hook command")
+	fs.StringVar(&logLevelValue, "log-level", logLevelValue, "Log level for diagnostics: error, info, or debug")
+	fs.BoolVar(&debugDefault, "debug", debugDefault, "Shortcut for --log-level=debug")
+	fs.BoolVar(&cfg.ShowVersion, "version", false, "Print build version information and exit")
+
+	configFileFlag := fs.String("config", cfg.ConfigFile, "Path to a JSON config file; defaults to .xxx-code/config.json when present")
+	systemPromptFileFlag := fs.String("system-prompt-file", raw.systemPromptFile, "Read the system prompt from a file")
+	cwdFlag := fs.String("cwd", raw.workingDir, "Working directory")
+	sessionFileFlag := fs.String("session-file", raw.sessionFile, "Path to the persisted session file")
+	daemonDirFlag := fs.String("daemon-dir", raw.daemonDir, "Directory for daemon-managed remote sessions")
+	mcpConfigFlag := fs.String("mcp-config", raw.mcpConfigFile, "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
+	readRootsFlag := fs.String("allow-read", joinCSV(raw.readRoots), "Comma-separated read roots; the working directory is always included")
+	writeRootsFlag := fs.String("allow-write", joinCSV(raw.writeRoots), "Comma-separated write roots; the working directory is always included unless --read-only is set")
+	allowToolsFlag := fs.String("allow-tools", joinCSV(raw.allowedTools), "Comma-separated tool allowlist; when set, only these tools may run")
+	denyToolsFlag := fs.String("deny-tools", joinCSV(raw.blockedTools), "Comma-separated tool denylist")
+	allowBashPrefixFlag := fs.String("allow-bash-prefix", joinCSV(raw.bashAllow), "Comma-separated allowed bash command prefixes")
+	denyBashPrefixFlag := fs.String("deny-bash-prefix", joinCSV(raw.bashDeny), "Comma-separated blocked bash command prefixes")
+	hookBeforeToolFlag := fs.String("hook-before-tool", cfg.HookBeforeTool, "Shell command to run before each tool call; non-zero exit blocks the tool")
+	hookAfterToolFlag := fs.String("hook-after-tool", cfg.HookAfterTool, "Shell command to run after each tool call")
+	hookAfterTurnFlag := fs.String("hook-after-turn", cfg.HookAfterTurn, "Shell command to run after each turn")
+	hookAgentEventFlag := fs.String("hook-agent-event", cfg.HookAgentEvent, "Shell command to run for agent lifecycle events")
+	logFileFlag := fs.String("log-file", cfg.LogFile, "Append diagnostic logs and stderr output to this file")
+
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+
+	visited := visitedFlags(fs)
+	if cfg.ShowVersion {
+		return cfg, nil
+	}
+
+	if visited["log-level"] {
+		level, err := diag.ParseLevel(logLevelValue)
+		if err != nil {
+			return Config{}, err
 		}
-	} else {
-		cfg.SessionFile = filepath.Join(cfg.WorkingDir, ".xxx-code", "session.json")
+		cfg.LogLevel = level
 	}
-	if strings.TrimSpace(*daemonDirFlag) != "" {
-		cfg.DaemonDir = resolvePath(cfg.WorkingDir, *daemonDirFlag)
-	} else {
-		cfg.DaemonDir = filepath.Join(cfg.WorkingDir, ".xxx-code", "daemon")
-	}
-
-	if strings.TrimSpace(*mcpConfigFlag) != "" {
-		cfg.MCPConfigFile = resolvePath(cfg.WorkingDir, *mcpConfigFlag)
+	if visited["debug"] {
+		if debugDefault {
+			cfg.LogLevel = diag.LevelDebug
+		} else if !visited["log-level"] {
+			cfg.LogLevel = diag.LevelInfo
+		}
 	}
 
-	cfg.ReadRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *readRootsFlag)...)
-	cfg.WriteRoots = append([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *writeRootsFlag)...)
+	cfg.WorkingDir = filepath.Clean(resolvePath(currentWD, *cwdFlag))
+	cfg.SessionFile = defaultSessionFile(cfg.WorkingDir, *sessionFileFlag)
+	cfg.DaemonDir = defaultDaemonDir(cfg.WorkingDir, *daemonDirFlag)
+	cfg.LogFile = resolveOptionalPath(cfg.WorkingDir, *logFileFlag)
+	cfg.ConfigFile = strings.TrimSpace(*configFileFlag)
+	if cfg.ConfigFile != "" {
+		cfg.ConfigFile = resolvePath(currentWD, cfg.ConfigFile)
+	}
+	cfg.MCPConfigFile = resolveOptionalPath(cfg.WorkingDir, *mcpConfigFlag)
+	cfg.ReadRoots = appendUniquePaths([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *readRootsFlag)...)
+	cfg.WriteRoots = appendUniquePaths([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *writeRootsFlag)...)
 	cfg.AllowedTools = parseCSV(*allowToolsFlag)
 	cfg.BlockedTools = parseCSV(*denyToolsFlag)
 	cfg.BashAllowPrefixes = parseCSV(*allowBashPrefixFlag)
@@ -159,21 +281,293 @@ func Load() (Config, error) {
 	cfg.HookAfterTurn = strings.TrimSpace(*hookAfterTurnFlag)
 	cfg.HookAgentEvent = strings.TrimSpace(*hookAgentEventFlag)
 
-	cfg.SystemPrompt = defaultSystemPrompt
-	if *systemPromptFile != "" {
-		data, err := os.ReadFile(*systemPromptFile)
+	if strings.TrimSpace(cfg.SystemPrompt) == "" {
+		cfg.SystemPrompt = defaultSystemPrompt
+	}
+	if systemPromptFile := resolveOptionalPath(cfg.WorkingDir, *systemPromptFileFlag); systemPromptFile != "" {
+		data, err := os.ReadFile(systemPromptFile)
 		if err != nil {
 			return Config{}, err
 		}
 		cfg.SystemPrompt = string(data)
 	}
 
-	cfg.Prompt = strings.TrimSpace(strings.Join(flag.Args(), " "))
+	if prompt := strings.TrimSpace(strings.Join(fs.Args(), " ")); prompt != "" {
+		cfg.Prompt = prompt
+		cfg.Print = true
+	}
+	cfg.Prompt = strings.TrimSpace(cfg.Prompt)
 	if cfg.Prompt != "" {
 		cfg.Print = true
 	}
 
+	if strings.TrimSpace(cfg.APIKey) == "" && (cfg.Daemon || strings.TrimSpace(cfg.RemoteURL) == "") {
+		return Config{}, fmt.Errorf("ANTHROPIC_API_KEY is required")
+	}
+
 	return cfg, nil
+}
+
+func defaultConfig() Config {
+	return Config{
+		BaseURL:           "https://api.anthropic.com",
+		Version:           "2023-06-01",
+		Model:             "claude-sonnet-4-5",
+		MaxTurns:          12,
+		MaxTokens:         16384,
+		MaxParallelAgents: 4,
+		ContextBudget:     120000,
+		CompactKeep:       12,
+		DaemonListenAddr:  "127.0.0.1:7331",
+		BashEnabled:       true,
+		Stream:            true,
+		HookTimeout:       30 * time.Second,
+		ToolTimeout:       2 * time.Minute,
+		SystemPrompt:      defaultSystemPrompt,
+		LogLevel:          diag.LevelInfo,
+	}
+}
+
+func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir string) {
+	applyString(&cfg.APIKey, file.APIKey)
+	applyString(&cfg.BaseURL, file.BaseURL)
+	applyString(&cfg.Version, file.AnthropicVersion)
+	applyString(&cfg.Model, file.Model)
+	applyInt(&cfg.MaxTurns, file.MaxTurns)
+	applyInt(&cfg.MaxTokens, file.MaxTokens)
+	applyInt(&cfg.MaxParallelAgents, file.MaxParallelAgents)
+	applyInt(&cfg.ContextBudget, file.ContextBudget)
+	applyInt(&cfg.CompactKeep, file.CompactKeep)
+	applyBool(&cfg.Daemon, file.Daemon)
+	applyString(&cfg.DaemonListenAddr, file.Listen)
+	applyString(&cfg.DaemonToken, file.DaemonToken)
+	applyString(&cfg.RemoteURL, file.RemoteURL)
+	applyString(&cfg.RemoteToken, file.RemoteToken)
+	applyString(&cfg.RemoteSession, file.RemoteSession)
+	applyBool(&cfg.RemoteList, file.RemoteList)
+	applyBool(&cfg.ReadOnly, file.ReadOnly)
+	applyBool(&cfg.BashEnabled, file.BashEnabled)
+	applyBool(&cfg.Resume, file.Resume)
+	applyBool(&cfg.Print, file.Print)
+	applyBool(&cfg.TUI, file.TUI)
+	applyBool(&cfg.Stream, file.Stream)
+	applyBool(&cfg.Verbose, file.Verbose)
+	applyString(&cfg.SystemPrompt, file.SystemPrompt)
+	applyString(&cfg.Prompt, file.Prompt)
+	applyString(&cfg.HookBeforeTool, file.HookBeforeTool)
+	applyString(&cfg.HookAfterTool, file.HookAfterTool)
+	applyString(&cfg.HookAfterTurn, file.HookAfterTurn)
+	applyString(&cfg.HookAgentEvent, file.HookAgentEvent)
+	applyString(&cfg.LogFile, file.LogFile)
+	if file.WorkingDir != nil {
+		raw.workingDir = resolvePath(configDir, *file.WorkingDir)
+	}
+	if file.SessionFile != nil {
+		raw.sessionFile = strings.TrimSpace(*file.SessionFile)
+	}
+	if file.DaemonDir != nil {
+		raw.daemonDir = strings.TrimSpace(*file.DaemonDir)
+	}
+	if file.MCPConfigFile != nil {
+		raw.mcpConfigFile = strings.TrimSpace(*file.MCPConfigFile)
+	}
+	if file.SystemPromptFile != nil {
+		raw.systemPromptFile = strings.TrimSpace(*file.SystemPromptFile)
+	}
+	if file.AllowRead != nil {
+		raw.readRoots = append([]string(nil), file.AllowRead...)
+	}
+	if file.AllowWrite != nil {
+		raw.writeRoots = append([]string(nil), file.AllowWrite...)
+	}
+	if file.AllowTools != nil {
+		raw.allowedTools = append([]string(nil), file.AllowTools...)
+	}
+	if file.DenyTools != nil {
+		raw.blockedTools = append([]string(nil), file.DenyTools...)
+	}
+	if file.AllowBashPrefix != nil {
+		raw.bashAllow = append([]string(nil), file.AllowBashPrefix...)
+	}
+	if file.DenyBashPrefix != nil {
+		raw.bashDeny = append([]string(nil), file.DenyBashPrefix...)
+	}
+	if file.HookTimeout != nil {
+		if duration, err := time.ParseDuration(strings.TrimSpace(*file.HookTimeout)); err == nil {
+			cfg.HookTimeout = duration
+		}
+	}
+	if file.ToolTimeout != nil {
+		if duration, err := time.ParseDuration(strings.TrimSpace(*file.ToolTimeout)); err == nil {
+			cfg.ToolTimeout = duration
+		}
+	}
+	if file.LogLevel != nil {
+		if level, err := diag.ParseLevel(*file.LogLevel); err == nil {
+			cfg.LogLevel = level
+		}
+	}
+	if file.Debug != nil && *file.Debug {
+		cfg.LogLevel = diag.LevelDebug
+	}
+}
+
+func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, bool)) error {
+	if value, ok := lookup("ANTHROPIC_API_KEY"); ok {
+		cfg.APIKey = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_MODEL"); ok {
+		cfg.Model = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("ANTHROPIC_BASE_URL"); ok {
+		cfg.BaseURL = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("ANTHROPIC_VERSION"); ok {
+		cfg.Version = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_LISTEN"); ok {
+		cfg.DaemonListenAddr = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_TOKEN"); ok {
+		cfg.DaemonToken = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_REMOTE_URL"); ok {
+		cfg.RemoteURL = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_REMOTE_TOKEN"); ok {
+		cfg.RemoteToken = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_REMOTE_SESSION"); ok {
+		cfg.RemoteSession = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_MCP_CONFIG"); ok {
+		raw.mcpConfigFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_SESSION_FILE"); ok {
+		raw.sessionFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_DAEMON_DIR"); ok {
+		raw.daemonDir = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_SYSTEM_PROMPT_FILE"); ok {
+		raw.systemPromptFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_LOG_FILE"); ok {
+		cfg.LogFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_LOG_LEVEL"); ok {
+		level, err := diag.ParseLevel(value)
+		if err != nil {
+			return err
+		}
+		cfg.LogLevel = level
+	}
+	if value, ok := lookup("XXX_CODE_DEBUG"); ok {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid XXX_CODE_DEBUG value: %w", err)
+		}
+		if enabled {
+			cfg.LogLevel = diag.LevelDebug
+		} else {
+			cfg.LogLevel = diag.LevelInfo
+		}
+	}
+	return nil
+}
+
+func resolveConfigPath(args []string, lookup func(string) (string, bool), workingDir string) (string, error) {
+	if explicit, ok := findStringFlag(args, "config"); ok {
+		explicit = strings.TrimSpace(explicit)
+		if explicit == "" {
+			return "", nil
+		}
+		path := resolvePath(workingDir, explicit)
+		if _, err := os.Stat(path); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	if value, ok := lookup("XXX_CODE_CONFIG"); ok && strings.TrimSpace(value) != "" {
+		path := resolvePath(workingDir, value)
+		if _, err := os.Stat(path); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	path := filepath.Join(workingDir, ".xxx-code", "config.json")
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return path, nil
+}
+
+func loadFileConfig(path string) (fileConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fileConfig{}, err
+	}
+	var cfg fileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fileConfig{}, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func visitedFlags(fs *flag.FlagSet) map[string]bool {
+	visited := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+	})
+	return visited
+}
+
+func versionMode(args []string) bool {
+	for i, arg := range args {
+		if arg == "--version" || arg == "-version" {
+			return true
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return i == 0 && strings.TrimSpace(arg) == "version"
+	}
+	return false
+}
+
+func findStringFlag(args []string, name string) (string, bool) {
+	flagName := "--" + strings.TrimSpace(name)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == flagName && i+1 < len(args) {
+			return args[i+1], true
+		}
+		if strings.HasPrefix(arg, flagName+"=") {
+			return strings.TrimPrefix(arg, flagName+"="), true
+		}
+	}
+	return "", false
+}
+
+func applyString(target *string, value *string) {
+	if value != nil {
+		*target = strings.TrimSpace(*value)
+	}
+}
+
+func applyInt(target *int, value *int) {
+	if value != nil {
+		*target = *value
+	}
+}
+
+func applyBool(target *bool, value *bool) {
+	if value != nil {
+		*target = *value
+	}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -185,6 +579,28 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func defaultSessionFile(workingDir, raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return filepath.Join(workingDir, ".xxx-code", "session.json")
+	}
+	return resolvePath(workingDir, raw)
+}
+
+func defaultDaemonDir(workingDir, raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return filepath.Join(workingDir, ".xxx-code", "daemon")
+	}
+	return resolvePath(workingDir, raw)
+}
+
+func resolveOptionalPath(base, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return resolvePath(base, raw)
+}
+
 func resolvePath(base, raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -193,7 +609,7 @@ func resolvePath(base, raw string) string {
 	if filepath.IsAbs(raw) {
 		return filepath.Clean(raw)
 	}
-	return filepath.Join(base, raw)
+	return filepath.Clean(filepath.Join(base, raw))
 }
 
 func parseRoots(base, raw string) []string {
@@ -220,4 +636,36 @@ func parseCSV(raw string) []string {
 		values = append(values, part)
 	}
 	return values
+}
+
+func joinCSV(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, ",")
+}
+
+func appendUniquePaths(base []string, extra ...string) []string {
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	result := make([]string, 0, len(base)+len(extra))
+	for _, value := range append(base, extra...) {
+		value = filepath.Clean(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }

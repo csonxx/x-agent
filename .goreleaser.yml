@@ -1,0 +1,63 @@
+version: 2
+
+project_name: xxx-code
+
+before:
+  hooks:
+    - cd xxx-code && go test ./...
+
+builds:
+  - id: xxx-code
+    dir: xxx-code
+    main: ./cmd/xxx-code
+    binary: xxx-code
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X github.com/caowenhua/x-agent/xxx-code/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/caowenhua/x-agent/xxx-code/internal/buildinfo.Commit={{ .Commit }}
+      - -X github.com/caowenhua/x-agent/xxx-code/internal/buildinfo.Date={{ .Date }}
+      - -X github.com/caowenhua/x-agent/xxx-code/internal/buildinfo.BuiltBy=goreleaser
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: xxx-code-archive
+    ids:
+      - xxx-code
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - xxx-code/README.md
+      - xxx-code/ROADMAP.md
+      - xxx-code/examples/config.json
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: caowenhua
+    name: x-agent

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
@@ -34,6 +37,7 @@ type Server struct {
 	providerFactory ProviderFactory
 	out             io.Writer
 	errOut          io.Writer
+	logger          *diag.Logger
 
 	mu       sync.Mutex
 	sessions map[string]*managedSession
@@ -148,6 +152,30 @@ type eventSubscriber struct {
 	ch chan engine.Event
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
 func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFactory) *Server {
 	if out == nil {
 		out = io.Discard
@@ -165,6 +193,7 @@ func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFacto
 		providerFactory: providerFactory,
 		out:             out,
 		errOut:          errOut,
+		logger:          diag.New(errOut, cfg.LogLevel),
 		sessions:        make(map[string]*managedSession),
 	}
 }
@@ -183,7 +212,7 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Fprintf(s.errOut, "xxx-code daemon listening on http://%s\n", s.config.DaemonListenAddr)
+	s.logger.Infof("daemon listening on http://%s", s.config.DaemonListenAddr)
 	err := httpServer.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return s.Close()
@@ -209,7 +238,13 @@ func (s *Server) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	closeErr := errors.Join(errs...)
+	if closeErr != nil {
+		s.logger.Errorf("daemon shutdown finished with error: %v", closeErr)
+	} else {
+		s.logger.Infof("daemon shutdown complete (%d sessions)", len(sessions))
+	}
+	return closeErr
 }
 
 func (s *Server) Handler() http.Handler {
@@ -217,7 +252,31 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/v1/sessions", s.handleSessions)
 	mux.HandleFunc("/v1/sessions/", s.handleSessionRoutes)
-	return mux
+	return s.withDiagnostics(mux)
+}
+
+func (s *Server) withDiagnostics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceID := strings.TrimSpace(r.Header.Get(diag.TraceHeader))
+		if traceID == "" {
+			traceID = diag.NewTraceID()
+		}
+		w.Header().Set(diag.TraceHeader, traceID)
+
+		started := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+
+		s.logger.Debugf(
+			"trace=%s method=%s path=%s status=%d duration=%s remote=%s",
+			traceID,
+			r.Method,
+			r.URL.Path,
+			recorder.status,
+			time.Since(started).Round(time.Millisecond),
+			r.RemoteAddr,
+		)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -731,6 +790,7 @@ func (s *Server) openSession(ctx context.Context, id string, resume bool) (*mana
 		return existing, nil
 	}
 	s.sessions[id] = session
+	s.logger.Debugf("opened session id=%s file=%s resume=%t", id, file, resume)
 	return session, nil
 }
 
@@ -893,6 +953,7 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 		_ = ms.close()
 		return nil, err
 	}
+	s.logger.Debugf("initialized managed session id=%s session_file=%s", id, file)
 	return ms, nil
 }
 

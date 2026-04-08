@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 )
@@ -305,6 +306,43 @@ func TestDaemonErrorsIncludeStructuredCode(t *testing.T) {
 	payload = doJSON(t, req, http.StatusNotFound)
 	if payload["code"] != "session_not_found" {
 		t.Fatalf("expected session_not_found code, got %+v", payload)
+	}
+}
+
+func TestDaemonAddsTraceIDHeader(t *testing.T) {
+	server, testServer := newTestDaemon(t)
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodGet, testServer.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(diag.TraceHeader, "trace_test")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get(diag.TraceHeader); got != "trace_test" {
+		t.Fatalf("expected trace header to be preserved, got %q", got)
+	}
+
+	req, err = http.NewRequest(http.MethodGet, testServer.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if !strings.HasPrefix(resp.Header.Get(diag.TraceHeader), "trace_") {
+		t.Fatalf("expected daemon to generate a trace id, got %q", resp.Header.Get(diag.TraceHeader))
 	}
 }
 
