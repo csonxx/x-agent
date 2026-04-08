@@ -13,7 +13,7 @@
 - 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
 - 主会话流式文本输出
 - REPL、TUI 与单次执行模式
-- HTTP daemon 与远程 session API
+- HTTP daemon、远程 bridge 与 session API
 - in-process multi-agent 基础设施
 - 子 agent 的 `spawn / send / cancel / wait / list`
 - workflow 的 `list / get / resume`
@@ -28,6 +28,7 @@ xxx-code/
   internal/cli/              REPL、事件输出、自动保存
   internal/config/           配置与参数
   internal/daemon/           常驻 HTTP daemon、远程 session API
+  internal/remote/           daemon bridge client、远程 REPL
   internal/engine/           核心运行时、消息模型、主循环、agent 管理
   internal/mcp/              MCP 配置加载、stdio/http/sse client、动态 tool bridge
   internal/persist/          session、agent 与 workflow 状态持久化
@@ -177,6 +178,50 @@ curl -s http://127.0.0.1:7331/v1/sessions/<id>/turns \
 ```
 
 这样别的服务、脚本或上层 orchestrator 就可以把 `xxx-code` 当作一个远程 agent backend 去调。
+
+## Remote Bridge 模式
+
+如果 daemon 已经跑起来，本地这个 CLI 也可以直接把它当成“远程后端”来用，而不是自己再起一个本地 provider/runtime：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --remote-list-sessions
+```
+
+直接连到一个已有或自动创建的远程 session：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --remote-session repo-main
+```
+
+或者单次远程执行一轮：
+
+```bash
+go run ./cmd/xxx-code \
+  --remote-url http://127.0.0.1:7331 \
+  --remote-session repo-main \
+  --print "分析当前目录代码结构"
+```
+
+远程 REPL 当前支持这些命令：
+
+- `:help`
+- `:session`
+- `:history [n]`
+- `:agents`
+- `:wait <agent-id>`
+- `:send <agent-id> <prompt>`
+- `:cancel <agent-id>`
+- `:workflows`
+- `:workflow <id>`
+- `:workflow-resume <id>`
+- `:save`
+- `:quit`
+
+这一路径下，本地 CLI 不需要直接配置 `ANTHROPIC_API_KEY`，模型调用和 session 持久化都由 daemon 负责。
 
 ## Session 持久化与恢复
 
