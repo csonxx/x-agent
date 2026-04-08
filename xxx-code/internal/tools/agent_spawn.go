@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -526,14 +527,15 @@ func hasAgentErrors(snapshots []engine.AgentSnapshot) bool {
 }
 
 type fanoutTaskResult struct {
-	Name      string   `json:"name"`
-	Prompt    string   `json:"prompt"`
-	DependsOn []string `json:"depends_on,omitempty"`
-	Priority  int      `json:"priority,omitempty"`
-	AgentID   string   `json:"agent_id,omitempty"`
-	Status    string   `json:"status"`
-	Result    string   `json:"result,omitempty"`
-	Error     string   `json:"error,omitempty"`
+	Name           string   `json:"name"`
+	Prompt         string   `json:"prompt"`
+	ResolvedPrompt string   `json:"resolved_prompt,omitempty"`
+	DependsOn      []string `json:"depends_on,omitempty"`
+	Priority       int      `json:"priority,omitempty"`
+	AgentID        string   `json:"agent_id,omitempty"`
+	Status         string   `json:"status"`
+	Result         string   `json:"result,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 type plannedFanoutTask struct {
@@ -542,6 +544,7 @@ type plannedFanoutTask struct {
 	key        string
 	dependsOn  []string
 	depIndexes []int
+	promptRefs []fanoutPromptReference
 	started    bool
 	done       bool
 	agentID    string
@@ -555,6 +558,14 @@ type fanoutWaitResult struct {
 	snapshot engine.AgentSnapshot
 	err      error
 }
+
+type fanoutPromptReference struct {
+	raw      string
+	taskName string
+	field    string
+}
+
+var fanoutPromptPattern = regexp.MustCompile(`\{\{\s*tasks\.([A-Za-z0-9_-]+)\.(result|status|error|agent_id)\s*\}\}`)
 
 func buildFanoutPlan(tasks []agentTaskInput) ([]*plannedFanoutTask, bool, error) {
 	plan := make([]*plannedFanoutTask, 0, len(tasks))
@@ -578,11 +589,13 @@ func buildFanoutPlan(tasks []agentTaskInput) ([]*plannedFanoutTask, bool, error)
 		if len(normalizedDeps) > 0 {
 			hasDependencies = true
 		}
+		promptRefs := parseFanoutPromptReferences(task.Prompt)
 		plan = append(plan, &plannedFanoutTask{
-			index:     i,
-			task:      task,
-			key:       displayName,
-			dependsOn: normalizedDeps,
+			index:      i,
+			task:       task,
+			key:        displayName,
+			dependsOn:  normalizedDeps,
+			promptRefs: promptRefs,
 			result: fanoutTaskResult{
 				Name:      displayName,
 				Prompt:    task.Prompt,
@@ -603,6 +616,9 @@ func buildFanoutPlan(tasks []agentTaskInput) ([]*plannedFanoutTask, bool, error)
 		}
 		if name := strings.TrimSpace(item.task.Name); name != "" && containsString(item.dependsOn, name) {
 			return nil, false, fmt.Errorf("task %s cannot depend on itself", item.key)
+		}
+		if err := validateFanoutPromptReferences(item, nameIndex); err != nil {
+			return nil, false, err
 		}
 	}
 
@@ -665,10 +681,20 @@ func executeFanoutPlan(ctx context.Context, execCtx *engine.ExecutionContext, pl
 			if !dependenciesSatisfied(item, plan) {
 				continue
 			}
+			prompt, err := renderFanoutPrompt(item, plan)
+			if err != nil {
+				item.done = true
+				item.result.Status = string(engine.AgentFailed)
+				item.result.Error = err.Error()
+				continue
+			}
+			if prompt != item.task.Prompt {
+				item.result.ResolvedPrompt = prompt
+			}
 
 			snapshot, err := execCtx.Runner.SpawnAgent(execCtx, engine.SpawnRequest{
 				Name:           item.task.Name,
-				Prompt:         item.task.Prompt,
+				Prompt:         prompt,
 				Background:     true,
 				Priority:       item.task.Priority,
 				Model:          item.task.Model,
@@ -805,6 +831,90 @@ func hasFanoutTaskErrors(results []fanoutTaskResult) bool {
 		}
 	}
 	return false
+}
+
+func parseFanoutPromptReferences(prompt string) []fanoutPromptReference {
+	matches := fanoutPromptPattern.FindAllStringSubmatch(prompt, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	references := make([]fanoutPromptReference, 0, len(matches))
+	for _, match := range matches {
+		if len(match) != 3 {
+			continue
+		}
+		references = append(references, fanoutPromptReference{
+			raw:      match[0],
+			taskName: match[1],
+			field:    match[2],
+		})
+	}
+	return references
+}
+
+func validateFanoutPromptReferences(item *plannedFanoutTask, nameIndex map[string]int) error {
+	if item == nil {
+		return nil
+	}
+	taskName := strings.TrimSpace(item.task.Name)
+	for _, ref := range item.promptRefs {
+		if ref.taskName == taskName && taskName != "" {
+			return fmt.Errorf("task %s cannot reference itself in prompt", item.key)
+		}
+		if _, ok := nameIndex[ref.taskName]; !ok {
+			return fmt.Errorf("task %s prompt references unknown task %s", item.key, ref.taskName)
+		}
+		if !containsString(item.dependsOn, ref.taskName) {
+			return fmt.Errorf("task %s prompt references %s but does not declare depends_on", item.key, ref.taskName)
+		}
+	}
+	return nil
+}
+
+func renderFanoutPrompt(item *plannedFanoutTask, plan []*plannedFanoutTask) (string, error) {
+	if item == nil || len(item.promptRefs) == 0 {
+		return item.task.Prompt, nil
+	}
+
+	rendered := item.task.Prompt
+	for _, ref := range item.promptRefs {
+		dependency, ok := findFanoutTaskByName(plan, ref.taskName)
+		if !ok {
+			return "", fmt.Errorf("task %s prompt references unknown task %s", item.key, ref.taskName)
+		}
+		if !dependency.done {
+			return "", fmt.Errorf("task %s prompt reference %s is not ready yet", item.key, ref.taskName)
+		}
+
+		value := fanoutPromptFieldValue(dependency.result, ref.field)
+		rendered = strings.ReplaceAll(rendered, ref.raw, value)
+	}
+	return rendered, nil
+}
+
+func findFanoutTaskByName(plan []*plannedFanoutTask, name string) (*plannedFanoutTask, bool) {
+	for _, item := range plan {
+		if strings.TrimSpace(item.task.Name) == name {
+			return item, true
+		}
+	}
+	return nil, false
+}
+
+func fanoutPromptFieldValue(result fanoutTaskResult, field string) string {
+	switch field {
+	case "result":
+		return result.Result
+	case "status":
+		return result.Status
+	case "error":
+		return result.Error
+	case "agent_id":
+		return result.AgentID
+	default:
+		return ""
+	}
 }
 
 func normalizeTaskDependencies(values []string) []string {

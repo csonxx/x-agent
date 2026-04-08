@@ -47,13 +47,14 @@ type fanoutResponse struct {
 }
 
 type fanoutTaskPayload struct {
-	Name      string   `json:"name"`
-	Status    string   `json:"status"`
-	Prompt    string   `json:"prompt"`
-	DependsOn []string `json:"depends_on"`
-	AgentID   string   `json:"agent_id"`
-	Result    string   `json:"result"`
-	Error     string   `json:"error"`
+	Name           string   `json:"name"`
+	Status         string   `json:"status"`
+	Prompt         string   `json:"prompt"`
+	ResolvedPrompt string   `json:"resolved_prompt"`
+	DependsOn      []string `json:"depends_on"`
+	AgentID        string   `json:"agent_id"`
+	Result         string   `json:"result"`
+	Error          string   `json:"error"`
 }
 
 func TestAgentFanoutToolWaitsForBatch(t *testing.T) {
@@ -346,6 +347,110 @@ func TestAgentFanoutToolRejectsDependencyCycles(t *testing.T) {
 	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
 		t.Fatalf("expected dependency cycle error, got %v", err)
+	}
+}
+
+func TestAgentFanoutToolInjectsDependencyResultsIntoPrompt(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "reader", "prompt": "read source"},
+			{"name": "writer", "prompt": "summarize {{tasks.reader.result}}", "depends_on": []string{"reader"}},
+		},
+	})
+
+	result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %s", result.Content)
+	}
+
+	var payload fanoutResponse
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	byName := mapFanoutTasks(payload.Tasks)
+	if !strings.Contains(byName["writer"].ResolvedPrompt, "reply:read source") {
+		t.Fatalf("expected resolved prompt to include upstream result, got %+v", byName["writer"])
+	}
+	if !strings.Contains(byName["writer"].Result, "reply:summarize reply:read source") {
+		t.Fatalf("expected downstream result to reflect injected prompt, got %+v", byName["writer"])
+	}
+}
+
+func TestAgentFanoutToolRejectsPromptReferencesWithoutDependencies(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "reader", "prompt": "read source"},
+			{"name": "writer", "prompt": "summarize {{tasks.reader.result}}"},
+		},
+	})
+
+	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err == nil || !strings.Contains(err.Error(), "does not declare depends_on") {
+		t.Fatalf("expected missing depends_on validation error, got %v", err)
+	}
+}
+
+func TestAgentFanoutToolRejectsPromptReferencesToUnknownTasks(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"wait": true,
+		"tasks": []map[string]any{
+			{"name": "writer", "prompt": "summarize {{tasks.reader.result}}", "depends_on": []string{"reader"}},
+		},
+	})
+
+	_, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err == nil || !strings.Contains(err.Error(), "unknown task") {
+		t.Fatalf("expected unknown task validation error, got %v", err)
 	}
 }
 

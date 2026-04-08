@@ -303,13 +303,26 @@ go run ./cmd/xxx-code \
   "tasks": [
     {"name": "reader", "prompt": "分析 README 并提炼风险", "priority": 4},
     {"name": "tester", "prompt": "检查最近改动的测试缺口", "priority": 8},
-    {"name": "writer", "prompt": "基于 reader 和 tester 的结果输出结论", "depends_on": ["reader", "tester"]}
+    {
+      "name": "writer",
+      "prompt": "基于 {{tasks.reader.result}} 和 {{tasks.tester.result}} 输出结论",
+      "depends_on": ["reader", "tester"]
+    }
   ],
   "wait": true
 }
 ```
 
 `depends_on` 会按任务名建立依赖图。前置任务成功后，下游任务才会启动；如果前置任务失败或取消，下游任务会被标记成 `skipped`，不会继续消耗 agent 槽位。为了保证这个编排过程可控，带依赖的 fanout 目前要求 `wait=true`。
+
+下游 prompt 里还可以显式引用上游任务字段：
+
+- `{{tasks.<name>.result}}`
+- `{{tasks.<name>.status}}`
+- `{{tasks.<name>.error}}`
+- `{{tasks.<name>.agent_id}}`
+
+这些引用必须同时满足两点：目标任务有 `name`，并且当前任务在 `depends_on` 里显式声明了这个依赖。执行结果里也会返回 `tasks[].resolved_prompt`，方便你调试真实下发给子 agent 的 prompt。
 
 这意味着上层 agent 不用手工循环很多次 `agent_spawn -> agent_wait`，而是可以直接表达一轮 fan-out / join，或者一张简单的 DAG。
 
