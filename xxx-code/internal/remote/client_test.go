@@ -204,6 +204,9 @@ func TestClientCanInspectPolicyHooksAndMCPStatus(t *testing.T) {
 	if hooks.BeforeTool != "echo before" || hooks.Timeout != time.Second.String() {
 		t.Fatalf("unexpected hook config: %+v", hooks)
 	}
+	if hooks.EventFile == "" {
+		t.Fatalf("expected hook event file to be exposed, got %+v", hooks)
+	}
 
 	mcpSummary, err := client.GetMCP(context.Background(), session.ID)
 	if err != nil {
@@ -621,6 +624,7 @@ func newTestConfig(t *testing.T) config.Config {
 		HookAfterTool:     "echo after",
 		HookAfterTurn:     "echo turn",
 		HookAgentEvent:    "echo agent",
+		HookEventFile:     filepath.Join(dir, ".xxx-code", "hooks.jsonl"),
 		ReadRoots:         []string{dir},
 		WriteRoots:        []string{dir},
 		BashEnabled:       true,

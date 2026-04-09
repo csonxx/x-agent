@@ -78,8 +78,8 @@
 - [x] provider 扩展
   - 已补 `anthropic / openai / azure-openai`
   - 已补统一 provider 选择配置与 OpenAI-compatible streaming/tool calling
-- [ ] hooks 向事件总线演进
-  - 不只是 shell hook
+- [x] hooks 向事件总线演进
+  - 已补 hooks bus，可同时分发到 shell hook 和 JSONL event sink
 - [ ] tool / runtime 插件化
   - 降低后续扩展成本
 
@@ -96,8 +96,8 @@
 当前默认推进顺序：
 
 1. 进入 P2 生态与扩展
-2. 继续做 hooks 事件总线演进
-3. 再继续做 tool / runtime plugin 化
+2. 继续做 tool / runtime plugin 化
+3. 再往更通用的扩展体系推进
 
 ## 完成标准
 

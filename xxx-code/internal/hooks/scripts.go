@@ -17,6 +17,7 @@ type Config struct {
 	AfterTool  string
 	AfterTurn  string
 	AgentEvent string
+	EventFile  string
 }
 
 type ScriptManager struct {

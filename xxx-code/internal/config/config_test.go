@@ -191,6 +191,25 @@ func TestLoadArgsRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestLoadArgsParsesHookEventFile(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"ANTHROPIC_API_KEY":        "test-key",
+		"XXX_CODE_HOOK_EVENT_FILE": ".xxx-code/hooks/events.jsonl",
+	}
+
+	cfg, err := LoadArgs([]string{
+		"--hook-event-file", "logs/override.jsonl",
+	}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.HookEventFile != filepath.Join(dir, "logs", "override.jsonl") {
+		t.Fatalf("unexpected hook event file: %q", cfg.HookEventFile)
+	}
+}
+
 func lookupFromMap(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]

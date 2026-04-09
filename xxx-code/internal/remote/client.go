@@ -82,6 +82,7 @@ type HookConfig struct {
 	AfterTool  string `json:"after_tool,omitempty"`
 	AfterTurn  string `json:"after_turn,omitempty"`
 	AgentEvent string `json:"agent_event,omitempty"`
+	EventFile  string `json:"event_file,omitempty"`
 	Timeout    string `json:"timeout,omitempty"`
 }
 

@@ -141,6 +141,7 @@ type sessionHookConfig struct {
 	AfterTool  string `json:"after_tool,omitempty"`
 	AfterTurn  string `json:"after_turn,omitempty"`
 	AgentEvent string `json:"agent_event,omitempty"`
+	EventFile  string `json:"event_file,omitempty"`
 	Timeout    string `json:"timeout,omitempty"`
 }
 
@@ -1129,11 +1130,12 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 			ReadOnly:            cfg.ReadOnly,
 			BashEnabled:         cfg.BashEnabled,
 		},
-		Hooks: hooks.NewScriptManager(hooks.Config{
+		Hooks: hooks.NewBus(hooks.Config{
 			BeforeTool: cfg.HookBeforeTool,
 			AfterTool:  cfg.HookAfterTool,
 			AfterTurn:  cfg.HookAfterTurn,
 			AgentEvent: cfg.HookAgentEvent,
+			EventFile:  cfg.HookEventFile,
 		}),
 		EventHandler: ms.handleEvent,
 	})
@@ -1218,6 +1220,7 @@ func (m *managedSession) hookConfig() sessionHookConfig {
 		AfterTool:  m.config.HookAfterTool,
 		AfterTurn:  m.config.HookAfterTurn,
 		AgentEvent: m.config.HookAgentEvent,
+		EventFile:  m.config.HookEventFile,
 		Timeout:    m.config.HookTimeout.String(),
 	}
 }

@@ -94,11 +94,12 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 			ReadOnly:            cfg.ReadOnly,
 			BashEnabled:         cfg.BashEnabled,
 		},
-		Hooks: hooks.NewScriptManager(hooks.Config{
+		Hooks: hooks.NewBus(hooks.Config{
 			BeforeTool: cfg.HookBeforeTool,
 			AfterTool:  cfg.HookAfterTool,
 			AfterTurn:  cfg.HookAfterTurn,
 			AgentEvent: cfg.HookAgentEvent,
+			EventFile:  cfg.HookEventFile,
 		}),
 		EventHandler: app.handleEvent,
 	})
@@ -529,6 +530,7 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 			"after_tool":  a.config.HookAfterTool,
 			"after_turn":  a.config.HookAfterTurn,
 			"agent_event": a.config.HookAgentEvent,
+			"event_file":  a.config.HookEventFile,
 		}, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil

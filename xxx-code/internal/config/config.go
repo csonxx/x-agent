@@ -72,6 +72,7 @@ type Config struct {
 	HookAfterTool              string
 	HookAfterTurn              string
 	HookAgentEvent             string
+	HookEventFile              string
 	HookTimeout                time.Duration
 	Resume                     bool
 	Print                      bool
@@ -131,6 +132,7 @@ type fileConfig struct {
 	HookAfterTool              *string  `json:"hook_after_tool,omitempty"`
 	HookAfterTurn              *string  `json:"hook_after_turn,omitempty"`
 	HookAgentEvent             *string  `json:"hook_agent_event,omitempty"`
+	HookEventFile              *string  `json:"hook_event_file,omitempty"`
 	HookTimeout                *string  `json:"hook_timeout,omitempty"`
 	ToolTimeout                *string  `json:"tool_timeout,omitempty"`
 	Resume                     *bool    `json:"resume,omitempty"`
@@ -165,6 +167,7 @@ type rawOptions struct {
 	daemonDenyModes            []string
 	daemonAllowSessionPrefixes []string
 	daemonDenySessionPrefixes  []string
+	hookEventFile              string
 }
 
 func Load() (Config, error) {
@@ -274,6 +277,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	hookAfterToolFlag := fs.String("hook-after-tool", cfg.HookAfterTool, "Shell command to run after each tool call")
 	hookAfterTurnFlag := fs.String("hook-after-turn", cfg.HookAfterTurn, "Shell command to run after each turn")
 	hookAgentEventFlag := fs.String("hook-agent-event", cfg.HookAgentEvent, "Shell command to run for agent lifecycle events")
+	hookEventFileFlag := fs.String("hook-event-file", raw.hookEventFile, "Append hook events as JSONL to this file")
 	logFileFlag := fs.String("log-file", cfg.LogFile, "Append diagnostic logs and stderr output to this file")
 
 	if err := fs.Parse(args); err != nil {
@@ -326,6 +330,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	cfg.HookAfterTool = strings.TrimSpace(*hookAfterToolFlag)
 	cfg.HookAfterTurn = strings.TrimSpace(*hookAfterTurnFlag)
 	cfg.HookAgentEvent = strings.TrimSpace(*hookAgentEventFlag)
+	cfg.HookEventFile = resolveOptionalPath(cfg.WorkingDir, *hookEventFileFlag)
 
 	if strings.TrimSpace(cfg.SystemPrompt) == "" {
 		cfg.SystemPrompt = defaultSystemPrompt
@@ -428,6 +433,9 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	}
 	if file.RemoteTokenFile != nil {
 		raw.remoteTokenFile = strings.TrimSpace(*file.RemoteTokenFile)
+	}
+	if file.HookEventFile != nil {
+		raw.hookEventFile = strings.TrimSpace(*file.HookEventFile)
 	}
 	if file.MCPConfigFile != nil {
 		raw.mcpConfigFile = strings.TrimSpace(*file.MCPConfigFile)
@@ -563,6 +571,9 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 	}
 	if value, ok := lookup("XXX_CODE_SYSTEM_PROMPT_FILE"); ok {
 		raw.systemPromptFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_HOOK_EVENT_FILE"); ok {
+		raw.hookEventFile = strings.TrimSpace(value)
 	}
 	if value, ok := lookup("XXX_CODE_LOG_FILE"); ok {
 		cfg.LogFile = strings.TrimSpace(value)

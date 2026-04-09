@@ -49,6 +49,8 @@ x-agent/
   - MCP health、reload、validate，以及 local/remote/daemon 三端统一 MCP 管理接口
 - P2 生态扩展第二阶段收口
   - provider 从 Anthropic-only 扩到 `anthropic / openai / azure-openai`
+- P2 生态扩展第三阶段收口
+  - hooks 从 shell command 扩成可组合事件总线，并支持 JSONL event sink
 
 更完整的能力说明见：
 
@@ -82,13 +84,12 @@ x-agent/
 
 ### P2 生态扩展
 
-- hooks 向事件总线演进
 - tool / runtime 插件化
 
 ## 推荐执行顺序
 
-1. 继续做 hooks 事件总线
-2. 再做 tool/runtime 插件化
+1. 继续做 tool/runtime 插件化
+2. 再往更通用扩展体系推进
 
 ## 快速开始
 

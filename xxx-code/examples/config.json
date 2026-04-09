@@ -21,6 +21,7 @@
   ],
   "remote_token_file": ".secrets/daemon-token.txt",
   "mcp_config": ".mcp.json",
+  "hook_event_file": ".xxx-code/hooks/events.jsonl",
   "allow_read": [
     "."
   ],
