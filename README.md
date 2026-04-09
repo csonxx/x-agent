@@ -5,7 +5,7 @@
 - `claude-code/`
   - Claude Code 源码快照，用来做架构分析、对照和设计参考
 - `xxx-code/`
-  - 一个用 Go 实现的 coding agent runtime，已经具备本地 CLI、TUI、multi-agent、workflow、MCP、daemon、remote bridge、streaming、auth 等核心能力
+  - 一个用 Go 实现的 coding agent runtime，已经具备本地 CLI、TUI、multi-agent、workflow、MCP、daemon、remote bridge、streaming、auth，以及多 provider（Anthropic / GPT / Gemini / MiniMax / GLM / Azure OpenAI）能力
 
 另外还有：
 
@@ -48,7 +48,7 @@ x-agent/
 - P2 生态扩展第一阶段收口
   - MCP health、reload、validate，以及 local/remote/daemon 三端统一 MCP 管理接口
 - P2 生态扩展第二阶段收口
-  - provider 从 Anthropic-only 扩到 `anthropic / openai / azure-openai`
+  - provider 从 Anthropic-only 扩到 `anthropic / openai / gpt / azure-openai / gemini / minimax / glm`
 - P2 生态扩展第三阶段收口
   - hooks 从 shell command 扩成可组合事件总线，并支持 JSONL event sink
 - P2 生态扩展第四阶段收口

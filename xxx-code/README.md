@@ -4,7 +4,7 @@
 
 当前版本已经包含：
 
-- 多 provider 选择（anthropic / openai / azure-openai）
+- 多 provider 选择（anthropic / openai / gpt / azure-openai / gemini / minimax / glm）
 - Anthropic Messages API 适配
 - 多轮 agent loop
 - 自动上下文压缩与 context budget 保护
@@ -166,7 +166,7 @@ go run ./cmd/xxx-code --config /path/to/config.json
 
 比较常用的诊断 flag 有：
 
-- `--provider anthropic|openai|azure-openai`
+- `--provider anthropic|openai|gpt|azure-openai|gemini|minimax|glm`
 - `--api-key ...`
 - `--plugin-dir .xxx-code/plugins`
 - `--hook-event-file .xxx-code/hooks/events.jsonl`
@@ -177,11 +177,15 @@ go run ./cmd/xxx-code --config /path/to/config.json
 
 ## Provider
 
-`xxx-code` 现在支持三种 provider：
+`xxx-code` 现在支持这些 provider：
 
 - `anthropic`
 - `openai`
+- `gpt`（`openai` 别名）
 - `azure-openai`
+- `gemini`
+- `minimax`
+- `glm`
 
 默认还是 `anthropic`。你可以用 config、env 或 flag 切换：
 
@@ -206,6 +210,13 @@ export OPENAI_API_KEY=...
 go run ./cmd/xxx-code --provider openai --model gpt-4.1
 ```
 
+`gpt` 只是 `openai` 的别名，方便直接按模型语义来选：
+
+```bash
+export OPENAI_API_KEY=...
+go run ./cmd/xxx-code --provider gpt --model gpt-4.1
+```
+
 如果你要接兼容的 OpenAI endpoint，也可以显式指定：
 
 ```bash
@@ -228,7 +239,36 @@ go run ./cmd/xxx-code \
 
 如果 `--base-url` 传的是 Azure 资源根地址，runtime 也会自动补 `/openai/v1`。
 
-目前这三种 provider 都已经接进同一套 tool-calling 主循环；`openai` 和 `azure-openai` 也支持流式文本输出与工具调用增量拼装。
+Gemini 走 Google 官方 OpenAI-compatible 入口：
+
+```bash
+export GEMINI_API_KEY=...
+go run ./cmd/xxx-code --provider gemini --model gemini-2.5-pro
+```
+
+MiniMax 走官方 OpenAI-compatible 入口：
+
+```bash
+export MINIMAX_API_KEY=...
+go run ./cmd/xxx-code --provider minimax --model MiniMax-M2.5
+```
+
+GLM 走智谱官方 Coding OpenAI-compatible 端点：
+
+```bash
+export ZHIPUAI_API_KEY=...
+go run ./cmd/xxx-code --provider glm --model glm-4.5
+```
+
+默认 base URL 如下，必要时都可以用 `--base-url` 覆盖：
+
+- `openai` / `gpt`: `https://api.openai.com/v1`
+- `azure-openai`: 需要你自己的 Azure 资源地址
+- `gemini`: `https://generativelanguage.googleapis.com/v1beta/openai`
+- `minimax`: `https://api.minimaxi.com/v1`
+- `glm`: `https://open.bigmodel.cn/api/coding/paas/v4`
+
+目前这些 provider 都已经接进同一套 tool-calling 主循环；OpenAI-compatible 家族也支持流式文本输出与工具调用增量拼装。
 
 ## 交互模式
 

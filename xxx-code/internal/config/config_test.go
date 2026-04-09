@@ -157,6 +157,29 @@ func TestLoadArgsSupportsOpenAIProviderEnv(t *testing.T) {
 	}
 }
 
+func TestLoadArgsSupportsGPTAliasProviderEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"XXX_CODE_PROVIDER": "gpt",
+		"OPENAI_API_KEY":    "openai-key",
+	}
+
+	cfg, err := LoadArgs([]string{"--model", "gpt-4.1"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "gpt" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "openai-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "" {
+		t.Fatalf("expected provider default base url to be resolved later, got %q", cfg.BaseURL)
+	}
+}
+
 func TestLoadArgsSupportsAzureOpenAIProviderEnv(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
@@ -178,6 +201,72 @@ func TestLoadArgsSupportsAzureOpenAIProviderEnv(t *testing.T) {
 	}
 	if cfg.BaseURL != "https://example-resource.openai.azure.com" {
 		t.Fatalf("unexpected base url: %q", cfg.BaseURL)
+	}
+}
+
+func TestLoadArgsSupportsGeminiProviderEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"XXX_CODE_PROVIDER": "gemini",
+		"GEMINI_API_KEY":    "gemini-key",
+	}
+
+	cfg, err := LoadArgs([]string{"--model", "gemini-2.5-pro"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "gemini" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "gemini-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "" {
+		t.Fatalf("expected empty explicit base url for gemini, got %q", cfg.BaseURL)
+	}
+}
+
+func TestLoadArgsSupportsMiniMaxProviderEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"XXX_CODE_PROVIDER": "minimax",
+		"MINIMAX_API_KEY":   "minimax-key",
+	}
+
+	cfg, err := LoadArgs([]string{"--model", "MiniMax-M2.5"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "minimax" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "minimax-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "" {
+		t.Fatalf("expected empty explicit base url for minimax, got %q", cfg.BaseURL)
+	}
+}
+
+func TestLoadArgsSupportsGLMProviderEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"XXX_CODE_PROVIDER": "glm",
+		"ZHIPUAI_API_KEY":   "glm-key",
+	}
+
+	cfg, err := LoadArgs([]string{"--model", "glm-4.5"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "glm" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "glm-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "" {
+		t.Fatalf("expected empty explicit base url for glm, got %q", cfg.BaseURL)
 	}
 }
 

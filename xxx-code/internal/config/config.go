@@ -225,7 +225,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	logLevelValue := cfg.LogLevel.String()
 	debugDefault := cfg.LogLevel == diag.LevelDebug
 
-	fs.StringVar(&cfg.Provider, "provider", cfg.Provider, "Model provider to use: anthropic, openai, or azure-openai")
+	fs.StringVar(&cfg.Provider, "provider", cfg.Provider, "Model provider to use: anthropic, openai, gpt, azure-openai, gemini, minimax, or glm")
 	fs.StringVar(&cfg.APIKey, "api-key", cfg.APIKey, "API key for the selected provider")
 	fs.StringVar(&cfg.Model, "model", cfg.Model, "Model or deployment name to use")
 	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL, "Base URL for the selected provider API")
@@ -367,7 +367,6 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 func defaultConfig() Config {
 	return Config{
 		Provider:             "anthropic",
-		BaseURL:              "https://api.anthropic.com",
 		Version:              "2023-06-01",
 		Model:                "claude-sonnet-4-5",
 		MaxTurns:             12,
@@ -611,7 +610,7 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 }
 
 func applyProviderEnvConfig(cfg *Config, lookup func(string) (string, bool)) {
-	switch strings.TrimSpace(strings.ToLower(cfg.Provider)) {
+	switch normalizeProviderName(cfg.Provider) {
 	case "", "anthropic":
 		if value, ok := lookup("ANTHROPIC_API_KEY"); ok {
 			cfg.APIKey = strings.TrimSpace(value)
@@ -629,7 +628,7 @@ func applyProviderEnvConfig(cfg *Config, lookup func(string) (string, bool)) {
 		if value, ok := lookup("OPENAI_BASE_URL"); ok {
 			cfg.BaseURL = strings.TrimSpace(value)
 		}
-	case "azure-openai", "azure_openai", "azure":
+	case "azure-openai":
 		if value, ok := lookup("AZURE_OPENAI_API_KEY"); ok {
 			cfg.APIKey = strings.TrimSpace(value)
 		} else if value, ok := lookup("OPENAI_API_KEY"); ok {
@@ -640,6 +639,33 @@ func applyProviderEnvConfig(cfg *Config, lookup func(string) (string, bool)) {
 		} else if value, ok := lookup("OPENAI_BASE_URL"); ok {
 			cfg.BaseURL = strings.TrimSpace(value)
 		}
+	case "gemini":
+		if value, ok := lookup("GEMINI_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("GEMINI_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		}
+	case "minimax":
+		if value, ok := lookup("MINIMAX_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("MINIMAX_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		}
+	case "glm":
+		if value, ok := lookup("GLM_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		} else if value, ok := lookup("ZHIPUAI_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		} else if value, ok := lookup("BIGMODEL_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		} else if value, ok := lookup("ZAI_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("GLM_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		}
 	}
 }
 
@@ -648,7 +674,7 @@ func validateProviderConfig(cfg Config) error {
 		return nil
 	}
 
-	provider := strings.TrimSpace(strings.ToLower(cfg.Provider))
+	provider := normalizeProviderName(cfg.Provider)
 	switch provider {
 	case "", "anthropic":
 		if strings.TrimSpace(cfg.APIKey) == "" {
@@ -657,10 +683,10 @@ func validateProviderConfig(cfg Config) error {
 		return nil
 	case "openai":
 		if strings.TrimSpace(cfg.APIKey) == "" {
-			return fmt.Errorf("OPENAI_API_KEY or XXX_CODE_API_KEY is required for provider openai")
+			return fmt.Errorf("OPENAI_API_KEY or XXX_CODE_API_KEY is required for provider openai/gpt")
 		}
 		return nil
-	case "azure-openai", "azure_openai", "azure":
+	case "azure-openai":
 		if strings.TrimSpace(cfg.APIKey) == "" {
 			return fmt.Errorf("AZURE_OPENAI_API_KEY, OPENAI_API_KEY, or XXX_CODE_API_KEY is required for provider azure-openai")
 		}
@@ -668,8 +694,42 @@ func validateProviderConfig(cfg Config) error {
 			return fmt.Errorf("AZURE_OPENAI_BASE_URL, OPENAI_BASE_URL, or XXX_CODE_BASE_URL is required for provider azure-openai")
 		}
 		return nil
+	case "gemini":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("GEMINI_API_KEY or XXX_CODE_API_KEY is required for provider gemini")
+		}
+		return nil
+	case "minimax":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("MINIMAX_API_KEY or XXX_CODE_API_KEY is required for provider minimax")
+		}
+		return nil
+	case "glm":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("GLM_API_KEY, ZHIPUAI_API_KEY, BIGMODEL_API_KEY, ZAI_API_KEY, or XXX_CODE_API_KEY is required for provider glm")
+		}
+		return nil
 	default:
-		return fmt.Errorf("unsupported provider %q; expected anthropic, openai, or azure-openai", cfg.Provider)
+		return fmt.Errorf("unsupported provider %q; expected anthropic, openai, gpt, azure-openai, gemini, minimax, or glm", cfg.Provider)
+	}
+}
+
+func normalizeProviderName(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", "anthropic":
+		return "anthropic"
+	case "openai", "gpt", "chatgpt":
+		return "openai"
+	case "azure", "azure_openai", "azure-openai":
+		return "azure-openai"
+	case "gemini", "google":
+		return "gemini"
+	case "minimax", "mini-max", "mini_max":
+		return "minimax"
+	case "glm", "zhipu", "z-ai", "zai":
+		return "glm"
+	default:
+		return strings.TrimSpace(strings.ToLower(raw))
 	}
 }
 

@@ -16,10 +16,18 @@ func TestNormalize(t *testing.T) {
 	}{
 		{input: "", want: ProviderAnthropic},
 		{input: " anthropic ", want: ProviderAnthropic},
+		{input: "gpt", want: ProviderOpenAI},
+		{input: "chatgpt", want: ProviderOpenAI},
 		{input: "openai", want: ProviderOpenAI},
 		{input: "azure", want: ProviderAzureOpenAI},
 		{input: "azure_openai", want: ProviderAzureOpenAI},
 		{input: "azure-openai", want: ProviderAzureOpenAI},
+		{input: "gemini", want: ProviderGemini},
+		{input: "google", want: ProviderGemini},
+		{input: "minimax", want: ProviderMiniMax},
+		{input: "mini-max", want: ProviderMiniMax},
+		{input: "glm", want: ProviderGLM},
+		{input: "zhipu", want: ProviderGLM},
 		{input: "custom-provider", want: "custom-provider"},
 	}
 
@@ -69,6 +77,29 @@ func TestNewSelectsProviderImplementation(t *testing.T) {
 				if authMode != string(openaiprovider.AuthModeBearer) {
 					t.Fatalf("expected bearer auth mode, got %s", authMode)
 				}
+				baseURL := reflect.ValueOf(client).Elem().FieldByName("baseURL").String()
+				if baseURL != "https://example.invalid/v1" {
+					t.Fatalf("expected explicit base url to be preserved, got %s", baseURL)
+				}
+			},
+		},
+		{
+			name:     "gpt alias",
+			provider: "gpt",
+			assert: func(t *testing.T, value any) {
+				t.Helper()
+				client, ok := value.(*openaiprovider.Client)
+				if !ok {
+					t.Fatalf("expected openai client, got %T", value)
+				}
+				authMode := reflect.ValueOf(client).Elem().FieldByName("authMode").String()
+				if authMode != string(openaiprovider.AuthModeBearer) {
+					t.Fatalf("expected bearer auth mode, got %s", authMode)
+				}
+				baseURL := reflect.ValueOf(client).Elem().FieldByName("baseURL").String()
+				if baseURL != defaultOpenAIBaseURL {
+					t.Fatalf("expected default openai base url %s, got %s", defaultOpenAIBaseURL, baseURL)
+				}
 			},
 		},
 		{
@@ -83,6 +114,51 @@ func TestNewSelectsProviderImplementation(t *testing.T) {
 				authMode := reflect.ValueOf(client).Elem().FieldByName("authMode").String()
 				if authMode != string(openaiprovider.AuthModeAPIKey) {
 					t.Fatalf("expected api_key auth mode, got %s", authMode)
+				}
+			},
+		},
+		{
+			name:     "gemini",
+			provider: "gemini",
+			assert: func(t *testing.T, value any) {
+				t.Helper()
+				client, ok := value.(*openaiprovider.Client)
+				if !ok {
+					t.Fatalf("expected gemini openai-compatible client, got %T", value)
+				}
+				baseURL := reflect.ValueOf(client).Elem().FieldByName("baseURL").String()
+				if baseURL != defaultGeminiBaseURL {
+					t.Fatalf("expected gemini default base url %s, got %s", defaultGeminiBaseURL, baseURL)
+				}
+			},
+		},
+		{
+			name:     "minimax",
+			provider: "minimax",
+			assert: func(t *testing.T, value any) {
+				t.Helper()
+				client, ok := value.(*openaiprovider.Client)
+				if !ok {
+					t.Fatalf("expected minimax openai-compatible client, got %T", value)
+				}
+				baseURL := reflect.ValueOf(client).Elem().FieldByName("baseURL").String()
+				if baseURL != defaultMiniMaxBaseURL {
+					t.Fatalf("expected minimax default base url %s, got %s", defaultMiniMaxBaseURL, baseURL)
+				}
+			},
+		},
+		{
+			name:     "glm",
+			provider: "glm",
+			assert: func(t *testing.T, value any) {
+				t.Helper()
+				client, ok := value.(*openaiprovider.Client)
+				if !ok {
+					t.Fatalf("expected glm openai-compatible client, got %T", value)
+				}
+				baseURL := reflect.ValueOf(client).Elem().FieldByName("baseURL").String()
+				if baseURL != defaultGLMBaseURL {
+					t.Fatalf("expected glm default base url %s, got %s", defaultGLMBaseURL, baseURL)
 				}
 			},
 		},
@@ -103,9 +179,16 @@ func TestNewSelectsProviderImplementation(t *testing.T) {
 			client := New(config.Config{
 				Provider: test.provider,
 				APIKey:   "test-key",
-				BaseURL:  "https://example.invalid",
 				Version:  "2023-06-01",
 			})
+			if test.provider == "openai" || test.provider == "azure" {
+				client = New(config.Config{
+					Provider: test.provider,
+					APIKey:   "test-key",
+					BaseURL:  "https://example.invalid",
+					Version:  "2023-06-01",
+				})
+			}
 			test.assert(t, client)
 		})
 	}
