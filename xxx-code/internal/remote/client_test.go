@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/daemon"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type remoteTestProvider struct{}
@@ -220,6 +223,66 @@ func TestClientCanInspectPolicyHooksAndMCPStatus(t *testing.T) {
 	}
 	if remoteErr.Code != "mcp_not_configured" {
 		t.Fatalf("expected mcp_not_configured code, got %+v", remoteErr)
+	}
+}
+
+func TestClientCanValidateReloadAndHealthCheckMCP(t *testing.T) {
+	cfg := newTestConfig(t)
+	mcpServer := newRemoteMCPHTTPServer(t)
+	defer mcpServer.Close()
+
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "remote-mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := client.ValidateMCP(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Present {
+		t.Fatalf("expected missing MCP config to be reported, got %+v", report)
+	}
+
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "transport": "http",
+      "url": %q
+    }
+  }
+}`, mcpServer.URL)
+	if err := os.WriteFile(filepath.Join(cfg.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := client.ReloadMCP(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ServerCount != 1 || summary.ToolCount != 1 {
+		t.Fatalf("expected one connected MCP server after reload, got %+v", summary)
+	}
+
+	health, err := client.GetMCPHealth(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(health) != 1 {
+		t.Fatalf("expected one MCP health status, got %+v", health)
+	}
+	if !health[0].Healthy || health[0].LastCheckedAt == nil {
+		t.Fatalf("expected healthy MCP status with timestamp, got %+v", health[0])
 	}
 }
 
@@ -513,6 +576,30 @@ func newStreamingTestClient(t *testing.T) (*Client, func()) {
 		httpServer.Close()
 		_ = server.Close()
 	}
+}
+
+func newRemoteMCPHTTPServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		server := sdkmcp.NewServer(&sdkmcp.Implementation{
+			Name:    "remote-test-mcp",
+			Version: "1.0.0",
+		}, nil)
+		sdkmcp.AddTool(server, &sdkmcp.Tool{
+			Name:        "echo_text",
+			Description: "Echo text back to the caller",
+		}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input struct {
+			Value string `json:"value" jsonschema:"value to echo back"`
+		}) (*sdkmcp.CallToolResult, map[string]string, error) {
+			_ = ctx
+			_ = req
+			return nil, map[string]string{"echo": input.Value}, nil
+		})
+		return server
+	}, nil)
+
+	return httptest.NewServer(handler)
 }
 
 func newTestConfig(t *testing.T) config.Config {

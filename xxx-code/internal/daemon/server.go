@@ -125,6 +125,10 @@ type mcpGetPromptRequest struct {
 	Arguments map[string]string `json:"arguments,omitempty"`
 }
 
+type mcpValidateRequest struct {
+	ConfigFile string `json:"config_file,omitempty"`
+}
+
 type sessionMCPSummary struct {
 	ConfigPath  string                    `json:"config_path,omitempty"`
 	ServerCount int                       `json:"server_count"`
@@ -819,19 +823,57 @@ func (s *Server) handleMCPRoutes(w http.ResponseWriter, r *http.Request, session
 		writeJSON(w, http.StatusOK, map[string]any{"mcp": session.mcpSummary()})
 		return
 	}
-	if session.mcpManager == nil {
-		writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
-		return
-	}
-
-	serverName := strings.TrimSpace(r.URL.Query().Get("server"))
 
 	switch parts[0] {
+	case "health":
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if session.mcpManager == nil {
+			writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
+			return
+		}
+		serverName := strings.TrimSpace(r.URL.Query().Get("server"))
+		health, err := session.mcpHealth(r.Context(), serverName)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"statuses": health})
+	case "reload":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		summary, err := session.reloadMCP(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mcp": summary})
+	case "validate":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req mcpValidateRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		report := session.validateMCP(strings.TrimSpace(req.ConfigFile))
+		writeJSON(w, http.StatusOK, map[string]any{"validation": report})
 	case "resources":
 		if r.Method != http.MethodGet {
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+		if session.mcpManager == nil {
+			writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
+			return
+		}
+		serverName := strings.TrimSpace(r.URL.Query().Get("server"))
 		resources, err := session.mcpManager.ListResources(r.Context(), serverName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -843,6 +885,11 @@ func (s *Server) handleMCPRoutes(w http.ResponseWriter, r *http.Request, session
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+		if session.mcpManager == nil {
+			writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
+			return
+		}
+		serverName := strings.TrimSpace(r.URL.Query().Get("server"))
 		templates, err := session.mcpManager.ListResourceTemplates(r.Context(), serverName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -854,6 +901,11 @@ func (s *Server) handleMCPRoutes(w http.ResponseWriter, r *http.Request, session
 			writeMethodNotAllowed(w, http.MethodGet)
 			return
 		}
+		if session.mcpManager == nil {
+			writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
+			return
+		}
+		serverName := strings.TrimSpace(r.URL.Query().Get("server"))
 		prompts, err := session.mcpManager.ListPrompts(r.Context(), serverName)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -863,6 +915,10 @@ func (s *Server) handleMCPRoutes(w http.ResponseWriter, r *http.Request, session
 	case "read-resource":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if session.mcpManager == nil {
+			writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
 			return
 		}
 		var req mcpReadResourceRequest
@@ -879,6 +935,10 @@ func (s *Server) handleMCPRoutes(w http.ResponseWriter, r *http.Request, session
 	case "get-prompt":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if session.mcpManager == nil {
+			writeError(w, http.StatusBadRequest, errors.New("MCP is not configured"))
 			return
 		}
 		var req mcpGetPromptRequest
@@ -1160,6 +1220,50 @@ func (m *managedSession) hookConfig() sessionHookConfig {
 		AgentEvent: m.config.HookAgentEvent,
 		Timeout:    m.config.HookTimeout.String(),
 	}
+}
+
+func (m *managedSession) mcpHealth(ctx context.Context, serverName string) ([]mcpruntime.ServerStatus, error) {
+	if m == nil || m.mcpManager == nil {
+		return nil, errors.New("MCP is not configured")
+	}
+	return m.mcpManager.Health(ctx, serverName)
+}
+
+func (m *managedSession) reloadMCP(ctx context.Context) (sessionMCPSummary, error) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	if m.mcpManager == nil {
+		manager, err := mcpruntime.Start(ctx, m.registry, mcpruntime.Options{
+			WorkingDir: m.config.WorkingDir,
+			ConfigFile: m.config.MCPConfigFile,
+		})
+		if err != nil {
+			return sessionMCPSummary{}, err
+		}
+		m.mcpManager = manager
+	} else if err := m.mcpManager.Reload(ctx); err != nil {
+		return sessionMCPSummary{}, err
+	}
+
+	if err := m.save(); err != nil {
+		return sessionMCPSummary{}, err
+	}
+	return m.mcpSummary(), nil
+}
+
+func (m *managedSession) validateMCP(configFile string) mcpruntime.ValidationReport {
+	if m == nil {
+		return mcpruntime.ValidationReport{}
+	}
+	options := mcpruntime.Options{
+		WorkingDir: m.config.WorkingDir,
+		ConfigFile: m.config.MCPConfigFile,
+	}
+	if strings.TrimSpace(configFile) != "" {
+		options.ConfigFile = configFile
+	}
+	return mcpruntime.ValidateOptions(options)
 }
 
 func (m *managedSession) messages(limit int) []engine.Message {

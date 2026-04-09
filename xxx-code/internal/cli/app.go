@@ -204,6 +204,9 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":workflow-tasks <id> [status|name=<task>] list persisted workflow tasks")
 		fmt.Fprintln(a.out, ":workflow-resume <id> [failed|task...]    resume a workflow from failed or selected tasks")
 		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
+		fmt.Fprintln(a.out, ":mcp-health [server]      ping MCP servers and print live health")
+		fmt.Fprintln(a.out, ":mcp-reload               reload the current MCP config and reconnect servers")
+		fmt.Fprintln(a.out, ":mcp-validate [path]      validate the current MCP config file")
 		fmt.Fprintln(a.out, ":mcp-resources [server]   list MCP resources")
 		fmt.Fprintln(a.out, ":mcp-resource-templates [server] list MCP resource templates")
 		fmt.Fprintln(a.out, ":mcp-prompts [server]     list MCP prompts")
@@ -297,11 +300,44 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, string(data))
 		return false, a.saveSession()
 	case ":mcp":
-		statuses := []mcpruntime.ServerStatus{}
-		if a.mcpManager != nil {
-			statuses = a.mcpManager.Statuses()
+		data, _ := json.MarshalIndent(a.currentMCPSummary(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-health":
+		if a.mcpManager == nil {
+			fmt.Fprintln(a.errOut, "error: MCP is not configured")
+			return false, nil
 		}
-		data, _ := json.MarshalIndent(statuses, "", "  ")
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		result, err := a.mcpManager.Health(ctx, server)
+		if err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-reload":
+		if err := a.reloadMCP(ctx); err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(a.currentMCPSummary(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":mcp-validate":
+		configFile := a.config.MCPConfigFile
+		if len(fields) > 1 {
+			configFile = fields[1]
+		}
+		report := mcpruntime.ValidateOptions(mcpruntime.Options{
+			WorkingDir: a.config.WorkingDir,
+			ConfigFile: configFile,
+		})
+		data, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil
 	case ":mcp-resources":
@@ -577,6 +613,44 @@ func (a *App) initMCP(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (a *App) reloadMCP(ctx context.Context) error {
+	if a.mcpManager == nil {
+		return a.initMCP(ctx)
+	}
+	if err := a.mcpManager.Reload(ctx); err != nil {
+		return err
+	}
+	for _, status := range a.mcpManager.Statuses() {
+		switch status.Status {
+		case mcpruntime.ServerStatusFailed:
+			fmt.Fprintf(a.errOut, "mcp server %s failed: %s\n", status.Name, status.Error)
+		}
+		for _, warning := range status.Warnings {
+			fmt.Fprintf(a.errOut, "mcp server %s warning: %s\n", status.Name, warning)
+		}
+	}
+	return nil
+}
+
+func (a *App) currentMCPSummary() map[string]any {
+	statuses := []mcpruntime.ServerStatus{}
+	configPath := ""
+	serverCount := 0
+	toolCount := 0
+	if a.mcpManager != nil {
+		statuses = a.mcpManager.Statuses()
+		configPath = a.mcpManager.ConfigPath()
+		serverCount = a.mcpManager.ServerCount()
+		toolCount = a.mcpManager.ToolCount()
+	}
+	return map[string]any{
+		"config_path":  configPath,
+		"server_count": serverCount,
+		"tool_count":   toolCount,
+		"statuses":     statuses,
+	}
 }
 
 func (a *App) closeMCP() error {

@@ -383,6 +383,40 @@ func (c *Client) GetMCP(ctx context.Context, sessionID string) (MCPSummary, erro
 	return response.MCP, nil
 }
 
+func (c *Client) GetMCPHealth(ctx context.Context, sessionID, serverName string) ([]mcpruntime.ServerStatus, error) {
+	var response struct {
+		Statuses []mcpruntime.ServerStatus `json:"statuses"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, withServerQuery("/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/health", serverName), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Statuses, nil
+}
+
+func (c *Client) ReloadMCP(ctx context.Context, sessionID string) (MCPSummary, error) {
+	var response struct {
+		MCP MCPSummary `json:"mcp"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/reload", map[string]any{}, &response); err != nil {
+		return MCPSummary{}, err
+	}
+	return response.MCP, nil
+}
+
+func (c *Client) ValidateMCP(ctx context.Context, sessionID, configFile string) (mcpruntime.ValidationReport, error) {
+	var response struct {
+		Validation mcpruntime.ValidationReport `json:"validation"`
+	}
+	payload := map[string]any{}
+	if strings.TrimSpace(configFile) != "" {
+		payload["config_file"] = strings.TrimSpace(configFile)
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/mcp/validate", payload, &response); err != nil {
+		return mcpruntime.ValidationReport{}, err
+	}
+	return response.Validation, nil
+}
+
 func (c *Client) ListMCPResources(ctx context.Context, sessionID, serverName string) ([]mcpruntime.Resource, error) {
 	var response struct {
 		Resources []mcpruntime.Resource `json:"resources"`

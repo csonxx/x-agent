@@ -1,6 +1,6 @@
 # xxx-code Roadmap
 
-更新时间：2026-04-08
+更新时间：2026-04-09
 
 ## 目标
 
@@ -72,8 +72,9 @@
 
 ## P2 生态与扩展
 
-- [ ] MCP 管理增强
-  - server health、重连、reload、配置校验
+- [x] MCP 管理增强
+  - 已补 server health、reload、配置校验
+  - 已补本地 REPL、remote REPL、daemon API 的统一入口
 - [ ] provider 扩展
   - OpenAI / Azure / 本地模型
 - [ ] hooks 向事件总线演进
@@ -94,8 +95,8 @@
 当前默认推进顺序：
 
 1. 进入 P2 生态与扩展
-2. 优先做 MCP 管理增强
-3. 再继续做 provider / hooks / plugin 化
+2. 继续做 provider 扩展
+3. 再继续做 hooks / plugin 化
 
 ## 完成标准
 

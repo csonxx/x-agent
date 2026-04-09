@@ -138,6 +138,9 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":history [n]              print the latest n remote messages (default 10)")
 		fmt.Fprintln(a.out, ":audit [n]                print the latest n remote audit events for this session (default 20)")
 		fmt.Fprintln(a.out, ":mcp                      print remote MCP status")
+		fmt.Fprintln(a.out, ":mcp-health [server]      ping remote MCP servers and print live health")
+		fmt.Fprintln(a.out, ":mcp-reload               reload the remote MCP config and reconnect servers")
+		fmt.Fprintln(a.out, ":mcp-validate [path]      validate the remote MCP config file")
 		fmt.Fprintln(a.out, ":mcp-resources [server]   list remote MCP resources")
 		fmt.Fprintln(a.out, ":mcp-resource-templates [server] list remote MCP resource templates")
 		fmt.Fprintln(a.out, ":mcp-prompts [server]     list remote MCP prompts")
@@ -188,6 +191,26 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 	case ":mcp":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			return a.client.GetMCP(ctx, a.sessionID)
+		})
+	case ":mcp-health":
+		server := ""
+		if len(fields) > 1 {
+			server = fields[1]
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.GetMCPHealth(ctx, a.sessionID, server)
+		})
+	case ":mcp-reload":
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ReloadMCP(ctx, a.sessionID)
+		})
+	case ":mcp-validate":
+		configFile := ""
+		if len(fields) > 1 {
+			configFile = fields[1]
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ValidateMCP(ctx, a.sessionID, configFile)
 		})
 	case ":mcp-resources":
 		server := ""

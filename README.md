@@ -45,6 +45,8 @@ x-agent/
   - `workflow_tasks`、失败节点/指定节点恢复、workflow artifact/result 索引、local/remote REPL 对齐
 - P2 安全与治理收口
   - daemon audit、API mode ACL、session prefix ACL、per-client rate limiting、token rotation、部署治理说明
+- P2 生态扩展第一阶段收口
+  - MCP health、reload、validate，以及 local/remote/daemon 三端统一 MCP 管理接口
 
 更完整的能力说明见：
 
@@ -78,14 +80,13 @@ x-agent/
 
 ### P2 生态扩展
 
-- MCP 管理增强
 - provider 扩展
 - hooks 向事件总线演进
 - tool / runtime 插件化
 
 ## 推荐执行顺序
 
-1. 扩 MCP 管理和 provider 生态
+1. 扩 provider 生态
 2. 继续做 hooks 事件总线和 tool/runtime 插件化
 
 ## 快速开始

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -44,6 +45,19 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	defer r.mu.RUnlock()
 	tool, ok := r.tools[name]
 	return tool, ok
+}
+
+func (r *Registry) RemoveTool(name string) {
+	if r == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	r.mu.Lock()
+	delete(r.tools, name)
+	r.mu.Unlock()
 }
 
 func (r *Registry) Definitions() []ToolDefinition {

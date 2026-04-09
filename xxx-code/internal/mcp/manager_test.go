@@ -87,6 +87,15 @@ func TestStartLoadsToolsFromDefaultConfig(t *testing.T) {
 	if _, ok := registry.Get("get_mcp_prompt"); !ok {
 		t.Fatal("expected MCP prompt fetch tool to be registered")
 	}
+	if _, ok := registry.Get("mcp_health"); !ok {
+		t.Fatal("expected MCP health tool to be registered")
+	}
+	if _, ok := registry.Get("mcp_reload"); !ok {
+		t.Fatal("expected MCP reload tool to be registered")
+	}
+	if _, ok := registry.Get("mcp_validate"); !ok {
+		t.Fatal("expected MCP validate tool to be registered")
+	}
 
 	tool, ok := registry.Get("mcp__tester__echo_text")
 	if !ok {
@@ -360,6 +369,125 @@ func TestStartMarksMissingRemoteURLAsFailed(t *testing.T) {
 	}
 	if !strings.Contains(statuses[0].Error, "url cannot be empty") {
 		t.Fatalf("unexpected error: %+v", statuses[0])
+	}
+}
+
+func TestManagerReloadReplacesToolsAndHealthIncludesFailedServers(t *testing.T) {
+	dir := t.TempDir()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeConfig := func(name string, includeBroken bool) {
+		t.Helper()
+		serverEntries := []string{}
+		if includeBroken {
+			serverEntries = append(serverEntries, `"broken": {"transport": "http"}`)
+		}
+		serverEntries = append(serverEntries, fmt.Sprintf(`%q: {
+      "command": %q,
+      "args": ["-test.run=TestMCPHelperProcess", "--", "mcp-echo-server"],
+      "env": {"GO_WANT_MCP_HELPER": "1"}
+    }`, name, exe))
+		configJSON := "{\n  \"mcpServers\": {\n    " + strings.Join(serverEntries, ",\n    ") + "\n  }\n}"
+		if err := os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeConfig("alpha", false)
+
+	registry := engine.NewRegistry()
+	manager, err := Start(context.Background(), registry, Options{WorkingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager == nil {
+		t.Fatal("expected MCP manager to be created")
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	if _, ok := registry.Get("mcp__alpha__echo_text"); !ok {
+		t.Fatal("expected alpha tool to be registered")
+	}
+
+	writeConfig("beta", true)
+	if err := manager.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := registry.Get("mcp__alpha__echo_text"); ok {
+		t.Fatal("expected alpha tool to be removed after reload")
+	}
+	if _, ok := registry.Get("mcp__beta__echo_text"); !ok {
+		t.Fatal("expected beta tool to be registered after reload")
+	}
+
+	health, err := manager.Health(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(health) != 2 {
+		t.Fatalf("expected health for both statuses, got %d", len(health))
+	}
+	byName := statusesByName(health)
+	if byName["broken"].Status != ServerStatusFailed {
+		t.Fatalf("expected broken server to remain failed, got %+v", byName["broken"])
+	}
+	if byName["beta"].Status != ServerStatusConnected || !byName["beta"].Healthy {
+		t.Fatalf("expected beta server to be healthy, got %+v", byName["beta"])
+	}
+	if byName["beta"].LastCheckedAt == nil {
+		t.Fatalf("expected beta server to record health check timestamp, got %+v", byName["beta"])
+	}
+}
+
+func TestValidateOptionsReportsConfigIssues(t *testing.T) {
+	dir := t.TempDir()
+	configJSON := `{
+  "mcpServers": {
+    "": {
+      "command": ""
+    },
+    "ws_bad": {
+      "transport": "websocket",
+      "url": "http://example.com/mcp"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := ValidateOptions(Options{WorkingDir: dir})
+	if !report.Present {
+		t.Fatalf("expected validation to find config file, got %+v", report)
+	}
+	if report.Valid {
+		t.Fatalf("expected invalid config report, got %+v", report)
+	}
+	if report.ServerCount != 2 {
+		t.Fatalf("expected 2 configured servers, got %+v", report)
+	}
+	if report.IssueCount < 2 {
+		t.Fatalf("expected at least 2 validation issues, got %+v", report)
+	}
+
+	messages := make([]string, 0, len(report.Issues))
+	for _, issue := range report.Issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, " | ")
+	if !strings.Contains(joined, "server name cannot be empty") {
+		t.Fatalf("expected empty server name issue, got %+v", report)
+	}
+	if !strings.Contains(joined, "MCP websocket url must use ws or wss") {
+		t.Fatalf("expected websocket URL validation issue, got %+v", report)
 	}
 }
 

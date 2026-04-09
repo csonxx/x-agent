@@ -11,6 +11,7 @@
 - lifecycle hooks 扩展点
 - 本地工具调用
 - 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
+- MCP health / reload / validate 管理能力
 - 主会话流式文本输出
 - REPL、TUI 与单次执行模式
 - HTTP daemon、远程 bridge 与 session API
@@ -66,6 +67,9 @@ xxx-code/
 - `read_mcp_resource`
 - `list_mcp_prompts`
 - `get_mcp_prompt`
+- `mcp_health`
+- `mcp_reload`
+- `mcp_validate`
 
 ## 运行前准备
 
@@ -165,6 +169,9 @@ REPL 内支持：
 - `:workflow-tasks <workflow-id> [status|name=<task>]`
 - `:workflow-resume <workflow-id> [failed|task...]`
 - `:mcp`
+- `:mcp-health [server]`
+- `:mcp-reload`
+- `:mcp-validate [path]`
 - `:mcp-resources [server]`
 - `:mcp-resource-templates [server]`
 - `:mcp-prompts [server]`
@@ -287,6 +294,9 @@ go run ./cmd/xxx-code \
 - `GET /v1/sessions/{id}/policy`
 - `GET /v1/sessions/{id}/hooks`
 - `GET /v1/sessions/{id}/mcp`
+- `GET /v1/sessions/{id}/mcp/health?server=name`
+- `POST /v1/sessions/{id}/mcp/reload`
+- `POST /v1/sessions/{id}/mcp/validate`
 - `GET /v1/sessions/{id}/mcp/resources?server=name`
 - `GET /v1/sessions/{id}/mcp/resource-templates?server=name`
 - `GET /v1/sessions/{id}/mcp/prompts?server=name`
@@ -452,6 +462,9 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:history [n]`
 - `:audit [n]`
 - `:mcp`
+- `:mcp-health [server]`
+- `:mcp-reload`
+- `:mcp-validate [path]`
 - `:mcp-resources [server]`
 - `:mcp-resource-templates [server]`
 - `:mcp-prompts [server]`
@@ -687,7 +700,28 @@ go run ./cmd/xxx-code \
   --mcp-config /path/to/.mcp.json
 ```
 
-REPL 里可以用 `:mcp` 查看每个 server 的连接状态、transport、URL、已注册工具和 warning。远程 server 上配置的 `headers` 会透传到每个 HTTP 请求里，方便接鉴权代理或自定义网关。
+REPL 里可以用这些命令做 MCP 管理：
+
+- `:mcp`
+- `:mcp-health [server]`
+- `:mcp-reload`
+- `:mcp-validate [path]`
+
+其中：
+
+- `:mcp` 看当前连接状态、transport、URL、已注册工具和 warning
+- `:mcp-health` 会对已连接 server 发 `ping`，回写 `healthy / last_checked_at / latency_millis`
+- `:mcp-reload` 会重新读取 `.mcp.json`，重连 server，并移除旧的动态工具桥接
+- `:mcp-validate` 会先做配置层校验，不要求当前 session 已经连上 MCP
+
+remote daemon 这边也提供了同一组 API：
+
+- `GET /v1/sessions/{id}/mcp`
+- `GET /v1/sessions/{id}/mcp/health?server=name`
+- `POST /v1/sessions/{id}/mcp/reload`
+- `POST /v1/sessions/{id}/mcp/validate`
+
+远程 server 上配置的 `headers` 会透传到每个 HTTP 请求里，方便接鉴权代理或自定义网关。
 
 ## Agent 调度
 

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -27,6 +28,21 @@ type ServerConfig struct {
 type Options struct {
 	WorkingDir string
 	ConfigFile string
+}
+
+type ValidationReport struct {
+	ConfigPath  string            `json:"config_path,omitempty"`
+	Present     bool              `json:"present"`
+	Valid       bool              `json:"valid"`
+	ServerCount int               `json:"server_count"`
+	IssueCount  int               `json:"issue_count"`
+	Issues      []ValidationIssue `json:"issues,omitempty"`
+}
+
+type ValidationIssue struct {
+	Server  string `json:"server,omitempty"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
 }
 
 func ResolveConfigPath(workingDir, explicit string) (string, bool, error) {
@@ -73,6 +89,68 @@ func LoadConfig(path string) (Config, error) {
 		cfg.Servers = map[string]ServerConfig{}
 	}
 	return cfg, nil
+}
+
+func ValidateOptions(options Options) ValidationReport {
+	report := ValidationReport{}
+	configPath, ok, err := ResolveConfigPath(options.WorkingDir, options.ConfigFile)
+	if err != nil {
+		report.ConfigPath = strings.TrimSpace(options.ConfigFile)
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: err.Error(),
+		})
+		report.IssueCount = len(report.Issues)
+		return report
+	}
+	report.ConfigPath = configPath
+	report.Present = ok
+	if !ok {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: "mcp config file not found",
+		})
+		report.IssueCount = len(report.Issues)
+		return report
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: err.Error(),
+		})
+		report.IssueCount = len(report.Issues)
+		return report
+	}
+
+	report.ServerCount = len(cfg.Servers)
+	if len(cfg.Servers) == 0 {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "warning",
+			Message: "mcp config contains no servers",
+		})
+	}
+
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		serverCfg := cfg.Servers[name]
+		validateServerConfig(&report, options.WorkingDir, name, serverCfg)
+	}
+
+	report.IssueCount = len(report.Issues)
+	report.Valid = true
+	for _, issue := range report.Issues {
+		if issue.Level == "error" {
+			report.Valid = false
+			return report
+		}
+	}
+	return report
 }
 
 func (c ServerConfig) Transport() string {
@@ -154,4 +232,67 @@ func expandPath(base, value string) (string, error) {
 		return filepath.Clean(value), nil
 	}
 	return filepath.Join(base, value), nil
+}
+
+func validateServerConfig(report *ValidationReport, workingDir, name string, cfg ServerConfig) {
+	server := strings.TrimSpace(name)
+	if server == "" {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: "server name cannot be empty",
+		})
+		return
+	}
+
+	transport := cfg.Transport()
+	switch transport {
+	case "stdio":
+		if strings.TrimSpace(cfg.Command) == "" {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Server:  server,
+				Level:   "error",
+				Message: "stdio MCP server command cannot be empty",
+			})
+		}
+		if _, err := cfg.CommandDir(workingDir); err != nil {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Server:  server,
+				Level:   "error",
+				Message: err.Error(),
+			})
+		}
+	case "http", "sse", "ws":
+		if _, err := cfg.EndpointForTransport(transport); err != nil {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Server:  server,
+				Level:   "error",
+				Message: err.Error(),
+			})
+		}
+	default:
+		report.Issues = append(report.Issues, ValidationIssue{
+			Server:  server,
+			Level:   "error",
+			Message: "unsupported MCP transport: " + transport,
+		})
+	}
+
+	for headerName := range cfg.Headers {
+		if strings.TrimSpace(headerName) == "" {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Server:  server,
+				Level:   "error",
+				Message: "header names cannot be empty",
+			})
+		}
+	}
+	for envName := range cfg.Env {
+		if strings.TrimSpace(envName) == "" {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Server:  server,
+				Level:   "error",
+				Message: "environment variable names cannot be empty",
+			})
+		}
+	}
 }

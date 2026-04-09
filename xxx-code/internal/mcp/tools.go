@@ -17,6 +17,9 @@ func (m *Manager) registerSupportTools(registry *engine.Registry) {
 	_ = registry.AddTool(&readResourceTool{manager: m})
 	_ = registry.AddTool(&listPromptsTool{manager: m})
 	_ = registry.AddTool(&getPromptTool{manager: m})
+	_ = registry.AddTool(&healthTool{manager: m})
+	_ = registry.AddTool(&reloadTool{manager: m})
+	_ = registry.AddTool(&validateTool{manager: m})
 }
 
 type listResourcesTool struct {
@@ -230,4 +233,92 @@ func orEmptyObject(raw json.RawMessage) []byte {
 		return []byte("{}")
 	}
 	return raw
+}
+
+type healthTool struct {
+	manager *Manager
+}
+
+func (t *healthTool) Definition() engine.ToolDefinition {
+	return engine.ToolDefinition{
+		Name:        "mcp_health",
+		Description: "Ping MCP servers and return live health information. Optionally filter by a specific server name.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"server": map[string]any{
+					"type":        "string",
+					"description": "Optional MCP server name to filter by.",
+				},
+			},
+		},
+	}
+}
+
+func (t *healthTool) Call(ctx context.Context, exec *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	_ = exec
+	var args struct {
+		Server string `json:"server,omitempty"`
+	}
+	if err := json.Unmarshal(orEmptyObject(input), &args); err != nil {
+		return engine.ToolResult{}, err
+	}
+	statuses, err := t.manager.Health(ctx, args.Server)
+	if err != nil {
+		return engine.ToolResult{}, err
+	}
+	return engine.ToolResult{Content: mustJSON(map[string]any{"statuses": statuses})}, nil
+}
+
+type reloadTool struct {
+	manager *Manager
+}
+
+func (t *reloadTool) Definition() engine.ToolDefinition {
+	return engine.ToolDefinition{
+		Name:        "mcp_reload",
+		Description: "Reload the current MCP config and reconnect all dynamic MCP tools.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	}
+}
+
+func (t *reloadTool) Call(ctx context.Context, exec *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	_ = exec
+	if err := json.Unmarshal(orEmptyObject(input), &map[string]any{}); err != nil {
+		return engine.ToolResult{}, err
+	}
+	if err := t.manager.Reload(ctx); err != nil {
+		return engine.ToolResult{}, err
+	}
+	return engine.ToolResult{Content: mustJSON(map[string]any{
+		"config_path": t.manager.ConfigPath(),
+		"statuses":    t.manager.Statuses(),
+	})}, nil
+}
+
+type validateTool struct {
+	manager *Manager
+}
+
+func (t *validateTool) Definition() engine.ToolDefinition {
+	return engine.ToolDefinition{
+		Name:        "mcp_validate",
+		Description: "Validate the current MCP config file without reconnecting servers.",
+		InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	}
+}
+
+func (t *validateTool) Call(ctx context.Context, exec *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
+	_ = ctx
+	_ = exec
+	if err := json.Unmarshal(orEmptyObject(input), &map[string]any{}); err != nil {
+		return engine.ToolResult{}, err
+	}
+	return engine.ToolResult{Content: mustJSON(t.manager.ValidationReport())}, nil
 }

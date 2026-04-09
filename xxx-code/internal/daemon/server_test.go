@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type daemonTestProvider struct{}
@@ -250,6 +252,64 @@ func TestDaemonCanReloadRotatingTokenFile(t *testing.T) {
 	}
 	doAuthorizedJSON(t, "new-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusOK)
 	doAuthorizedJSON(t, "old-secret", mustRequest(t, http.MethodGet, testServer.URL+"/v1/sessions", nil), http.StatusUnauthorized)
+}
+
+func TestDaemonCanValidateReloadAndHealthCheckMCP(t *testing.T) {
+	cfg := newTestConfig(t)
+	mcpServer := newDaemonMCPHTTPServer(t)
+	defer mcpServer.Close()
+
+	server := New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &daemonTestProvider{}
+	})
+	testServer := httptest.NewServer(server.Handler())
+	defer func() {
+		_ = server.Close()
+		testServer.Close()
+	}()
+
+	created := postJSON(t, testServer.URL+"/v1/sessions", map[string]any{}, http.StatusCreated)
+	sessionID := created["session"].(map[string]any)["id"].(string)
+
+	validate := postJSON(t, testServer.URL+"/v1/sessions/"+sessionID+"/mcp/validate", map[string]any{}, http.StatusOK)
+	report := validate["validation"].(map[string]any)
+	if report["present"] != false {
+		t.Fatalf("expected missing MCP config to be reported, got %+v", report)
+	}
+
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "transport": "http",
+      "url": %q
+    }
+  }
+}`, mcpServer.URL)
+	if err := os.WriteFile(filepath.Join(cfg.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := postJSON(t, testServer.URL+"/v1/sessions/"+sessionID+"/mcp/reload", map[string]any{}, http.StatusOK)
+	summary := reloaded["mcp"].(map[string]any)
+	if summary["server_count"].(float64) != 1 {
+		t.Fatalf("expected one MCP server after reload, got %+v", summary)
+	}
+
+	health := getJSON(t, testServer.URL+"/v1/sessions/"+sessionID+"/mcp/health", http.StatusOK)
+	statuses := health["statuses"].([]any)
+	if len(statuses) != 1 {
+		t.Fatalf("expected one MCP health status, got %+v", health)
+	}
+	status := statuses[0].(map[string]any)
+	if status["healthy"] != true {
+		t.Fatalf("expected MCP server to be healthy, got %+v", status)
+	}
+	if strings.TrimSpace(status["status"].(string)) != "connected" {
+		t.Fatalf("expected connected MCP status, got %+v", status)
+	}
+	if _, ok := status["last_checked_at"].(string); !ok {
+		t.Fatalf("expected health check timestamp, got %+v", status)
+	}
 }
 
 func TestManagedSessionCloseCancelsActiveTurnAndPersistsState(t *testing.T) {
@@ -534,6 +594,30 @@ func newTestDaemon(t *testing.T) (*Server, *httptest.Server) {
 		return &daemonTestProvider{}
 	})
 	return server, httptest.NewServer(server.Handler())
+}
+
+func newDaemonMCPHTTPServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		server := sdkmcp.NewServer(&sdkmcp.Implementation{
+			Name:    "daemon-test-mcp",
+			Version: "1.0.0",
+		}, nil)
+		sdkmcp.AddTool(server, &sdkmcp.Tool{
+			Name:        "echo_text",
+			Description: "Echo text back to the caller",
+		}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input struct {
+			Value string `json:"value" jsonschema:"value to echo back"`
+		}) (*sdkmcp.CallToolResult, map[string]string, error) {
+			_ = ctx
+			_ = req
+			return nil, map[string]string{"echo": input.Value}, nil
+		})
+		return server
+	}, nil)
+
+	return httptest.NewServer(handler)
 }
 
 func newTestConfig(t *testing.T) config.Config {

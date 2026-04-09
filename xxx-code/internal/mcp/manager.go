@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,25 +25,33 @@ const (
 )
 
 type ServerStatus struct {
-	Name      string   `json:"name"`
-	Transport string   `json:"transport"`
-	Command   string   `json:"command,omitempty"`
-	URL       string   `json:"url,omitempty"`
-	Status    string   `json:"status"`
-	ToolNames []string `json:"tool_names,omitempty"`
-	Warnings  []string `json:"warnings,omitempty"`
-	Error     string   `json:"error,omitempty"`
+	Name          string     `json:"name"`
+	Transport     string     `json:"transport"`
+	Command       string     `json:"command,omitempty"`
+	URL           string     `json:"url,omitempty"`
+	Status        string     `json:"status"`
+	ToolNames     []string   `json:"tool_names,omitempty"`
+	Warnings      []string   `json:"warnings,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	Healthy       bool       `json:"healthy,omitempty"`
+	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
+	LatencyMillis int64      `json:"latency_millis,omitempty"`
 }
 
 type Manager struct {
-	configPath string
-	servers    []*connectedServer
-	statuses   []ServerStatus
+	mu           sync.RWMutex
+	registry     *engine.Registry
+	options      Options
+	configPath   string
+	servers      []*connectedServer
+	statuses     []ServerStatus
+	dynamicTools []string
 }
 
 type connectedServer struct {
-	name    string
-	session *sdkmcp.ClientSession
+	name        string
+	statusIndex int
+	session     *sdkmcp.ClientSession
 }
 
 type Resource struct {
@@ -132,85 +142,12 @@ func Start(ctx context.Context, registry *engine.Registry, options Options) (*Ma
 	}
 
 	manager := &Manager{configPath: configPath}
+	manager.registry = registry
+	manager.options = options
 	manager.registerSupportTools(registry)
-	names := make([]string, 0, len(cfg.Servers))
-	for name := range cfg.Servers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		serverCfg := cfg.Servers[name]
-		status := ServerStatus{
-			Name:      name,
-			Transport: serverCfg.Transport(),
-			Command:   serverCfg.Command,
-			URL:       serverCfg.URL,
-		}
-
-		if strings.TrimSpace(name) == "" {
-			status.Status = ServerStatusFailed
-			status.Error = "server name cannot be empty"
-			manager.statuses = append(manager.statuses, status)
-			continue
-		}
-		switch status.Transport {
-		case "stdio":
-			if strings.TrimSpace(serverCfg.Command) == "" {
-				status.Status = ServerStatusFailed
-				status.Error = "stdio MCP server command cannot be empty"
-				manager.statuses = append(manager.statuses, status)
-				continue
-			}
-		case "http", "sse", "ws":
-			endpoint, err := serverCfg.EndpointForTransport(status.Transport)
-			if err != nil {
-				status.Status = ServerStatusFailed
-				status.Error = err.Error()
-				manager.statuses = append(manager.statuses, status)
-				continue
-			}
-			status.URL = endpoint
-		default:
-			status.Status = ServerStatusFailed
-			status.Error = "unsupported MCP transport: " + status.Transport
-			manager.statuses = append(manager.statuses, status)
-			continue
-		}
-
-		server, err := connectServer(ctx, name, serverCfg, options.WorkingDir)
-		if err != nil {
-			status.Status = ServerStatusFailed
-			status.Error = err.Error()
-			manager.statuses = append(manager.statuses, status)
-			continue
-		}
-
-		remoteTools, err := listAllTools(ctx, server.session)
-		if err != nil {
-			_ = server.session.Close()
-			status.Status = ServerStatusFailed
-			status.Error = "list tools: " + err.Error()
-			manager.statuses = append(manager.statuses, status)
-			continue
-		}
-
-		for _, remoteTool := range remoteTools {
-			bridge, err := newToolBridge(name, remoteTool, server.session)
-			if err != nil {
-				status.Warnings = append(status.Warnings, err.Error())
-				continue
-			}
-			if err := registry.AddTool(bridge); err != nil {
-				status.Warnings = append(status.Warnings, err.Error())
-				continue
-			}
-			status.ToolNames = append(status.ToolNames, bridge.Definition().Name)
-		}
-
-		status.Status = ServerStatusConnected
-		manager.servers = append(manager.servers, server)
-		manager.statuses = append(manager.statuses, status)
+	if err := manager.load(ctx, configPath, cfg); err != nil {
+		_ = manager.Close()
+		return nil, err
 	}
 
 	return manager, nil
@@ -220,12 +157,92 @@ func (m *Manager) Close() error {
 	if m == nil {
 		return nil
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closeLocked()
+}
+
+func (m *Manager) Reload(ctx context.Context) error {
+	if m == nil {
+		return errors.New("MCP is not configured")
+	}
+	configPath, ok, err := ResolveConfigPath(m.options.WorkingDir, m.options.ConfigFile)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err := m.closeLocked(); err != nil {
+			return err
+		}
+		m.configPath = ""
+		m.statuses = nil
+		return nil
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.closeLocked(); err != nil {
+		return err
+	}
+	m.configPath = configPath
+	return m.loadLocked(ctx, configPath, cfg)
+}
+
+func (m *Manager) Health(ctx context.Context, serverName string) ([]ServerStatus, error) {
+	if m == nil {
+		return nil, errors.New("MCP is not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
+		for _, server := range m.servers {
+			m.pingServerLocked(ctx, server)
+		}
+		return cloneStatuses(m.statuses), nil
+	}
+
+	statusIndex := m.statusIndexByNameLocked(serverName)
+	if statusIndex < 0 {
+		return nil, fmt.Errorf("unknown MCP server: %s", serverName)
+	}
+	if server, _, err := m.serverByNameLocked(serverName); err == nil {
+		m.pingServerLocked(ctx, server)
+	}
+	return m.statusesBySelectionLocked([]int{statusIndex}), nil
+}
+
+func (m *Manager) ValidationReport() ValidationReport {
+	if m == nil {
+		return ValidationReport{}
+	}
+	m.mu.RLock()
+	options := m.options
+	m.mu.RUnlock()
+	return ValidateOptions(options)
+}
+
+func (m *Manager) closeLocked() error {
 	var errs []error
+	for _, name := range m.dynamicTools {
+		if m.registry != nil {
+			m.registry.RemoveTool(name)
+		}
+	}
+	m.dynamicTools = nil
 	for _, server := range m.servers {
 		if err := server.session.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close MCP server %s: %w", server.name, err))
 		}
 	}
+	m.servers = nil
+	m.statuses = nil
 	return errors.Join(errs...)
 }
 
@@ -233,6 +250,8 @@ func (m *Manager) ConfigPath() string {
 	if m == nil {
 		return ""
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.configPath
 }
 
@@ -240,11 +259,21 @@ func (m *Manager) Statuses() []ServerStatus {
 	if m == nil {
 		return nil
 	}
-	statuses := make([]ServerStatus, 0, len(m.statuses))
-	for _, status := range m.statuses {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cloneStatuses(m.statuses)
+}
+
+func cloneStatuses(input []ServerStatus) []ServerStatus {
+	statuses := make([]ServerStatus, 0, len(input))
+	for _, status := range input {
 		copyStatus := status
 		copyStatus.ToolNames = append([]string(nil), status.ToolNames...)
 		copyStatus.Warnings = append([]string(nil), status.Warnings...)
+		if status.LastCheckedAt != nil {
+			value := *status.LastCheckedAt
+			copyStatus.LastCheckedAt = &value
+		}
 		statuses = append(statuses, copyStatus)
 	}
 	return statuses
@@ -254,6 +283,8 @@ func (m *Manager) ToolCount() int {
 	if m == nil {
 		return 0
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	count := 0
 	for _, status := range m.statuses {
 		count += len(status.ToolNames)
@@ -265,6 +296,8 @@ func (m *Manager) ServerCount() int {
 	if m == nil {
 		return 0
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.statuses)
 }
 
@@ -670,31 +703,196 @@ func renderCallToolResult(result *sdkmcp.CallToolResult) string {
 }
 
 func (m *Manager) selectedServers(name string) ([]*connectedServer, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	servers, _, err := m.selectedServersLocked(name)
+	return servers, err
+}
+
+func (m *Manager) selectedServersLocked(name string) ([]*connectedServer, []int, error) {
 	if strings.TrimSpace(name) == "" {
 		servers := make([]*connectedServer, 0, len(m.servers))
+		indexes := make([]int, 0, len(m.servers))
 		servers = append(servers, m.servers...)
-		return servers, nil
+		for _, server := range m.servers {
+			indexes = append(indexes, server.statusIndex)
+		}
+		return servers, indexes, nil
 	}
-	server, err := m.serverByName(name)
+	server, index, err := m.serverByNameLocked(name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return []*connectedServer{server}, nil
+	return []*connectedServer{server}, []int{index}, nil
 }
 
 func (m *Manager) serverByName(name string) (*connectedServer, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	server, _, err := m.serverByNameLocked(name)
+	return server, err
+}
+
+func (m *Manager) serverByNameLocked(name string) (*connectedServer, int, error) {
 	if m == nil {
-		return nil, errors.New("MCP is not configured")
+		return nil, -1, errors.New("MCP is not configured")
 	}
 	for _, server := range m.servers {
 		if server.name == name {
-			return server, nil
+			return server, server.statusIndex, nil
 		}
 	}
 	if strings.TrimSpace(name) == "" {
-		return nil, errors.New("MCP server name is required")
+		return nil, -1, errors.New("MCP server name is required")
 	}
-	return nil, fmt.Errorf("unknown MCP server: %s", name)
+	return nil, -1, fmt.Errorf("unknown MCP server: %s", name)
+}
+
+func (m *Manager) statusesBySelectionLocked(indexes []int) []ServerStatus {
+	if len(indexes) == 0 {
+		return nil
+	}
+	selected := make([]ServerStatus, 0, len(indexes))
+	for _, index := range indexes {
+		if index < 0 || index >= len(m.statuses) {
+			continue
+		}
+		status := m.statuses[index]
+		status.ToolNames = append([]string(nil), status.ToolNames...)
+		status.Warnings = append([]string(nil), status.Warnings...)
+		selected = append(selected, status)
+	}
+	return selected
+}
+
+func (m *Manager) load(ctx context.Context, configPath string, cfg Config) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configPath = configPath
+	return m.loadLocked(ctx, configPath, cfg)
+}
+
+func (m *Manager) loadLocked(ctx context.Context, configPath string, cfg Config) error {
+	m.configPath = configPath
+	for _, name := range m.dynamicTools {
+		if m.registry != nil {
+			m.registry.RemoveTool(name)
+		}
+	}
+	m.statuses = nil
+	m.servers = nil
+	m.dynamicTools = nil
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		serverCfg := cfg.Servers[name]
+		status := ServerStatus{
+			Name:      name,
+			Transport: serverCfg.Transport(),
+			Command:   serverCfg.Command,
+			URL:       serverCfg.URL,
+		}
+
+		if strings.TrimSpace(name) == "" {
+			status.Status = ServerStatusFailed
+			status.Error = "server name cannot be empty"
+			m.statuses = append(m.statuses, status)
+			continue
+		}
+		switch status.Transport {
+		case "stdio":
+			if strings.TrimSpace(serverCfg.Command) == "" {
+				status.Status = ServerStatusFailed
+				status.Error = "stdio MCP server command cannot be empty"
+				m.statuses = append(m.statuses, status)
+				continue
+			}
+		case "http", "sse", "ws":
+			endpoint, err := serverCfg.EndpointForTransport(status.Transport)
+			if err != nil {
+				status.Status = ServerStatusFailed
+				status.Error = err.Error()
+				m.statuses = append(m.statuses, status)
+				continue
+			}
+			status.URL = endpoint
+		default:
+			status.Status = ServerStatusFailed
+			status.Error = "unsupported MCP transport: " + status.Transport
+			m.statuses = append(m.statuses, status)
+			continue
+		}
+
+		server, err := connectServer(ctx, name, serverCfg, m.options.WorkingDir)
+		if err != nil {
+			status.Status = ServerStatusFailed
+			status.Error = err.Error()
+			m.statuses = append(m.statuses, status)
+			continue
+		}
+
+		remoteTools, err := listAllTools(ctx, server.session)
+		if err != nil {
+			_ = server.session.Close()
+			status.Status = ServerStatusFailed
+			status.Error = "list tools: " + err.Error()
+			m.statuses = append(m.statuses, status)
+			continue
+		}
+
+		for _, remoteTool := range remoteTools {
+			bridge, err := newToolBridge(name, remoteTool, server.session)
+			if err != nil {
+				status.Warnings = append(status.Warnings, err.Error())
+				continue
+			}
+			if err := m.registry.AddTool(bridge); err != nil {
+				status.Warnings = append(status.Warnings, err.Error())
+				continue
+			}
+			status.ToolNames = append(status.ToolNames, bridge.Definition().Name)
+			m.dynamicTools = append(m.dynamicTools, bridge.Definition().Name)
+		}
+
+		status.Status = ServerStatusConnected
+		server.statusIndex = len(m.statuses)
+		m.servers = append(m.servers, server)
+		m.statuses = append(m.statuses, status)
+	}
+	return nil
+}
+
+func (m *Manager) pingServerLocked(ctx context.Context, server *connectedServer) {
+	if server == nil || server.statusIndex < 0 || server.statusIndex >= len(m.statuses) {
+		return
+	}
+	started := time.Now()
+	err := server.session.Ping(ctx, &sdkmcp.PingParams{})
+	current := m.statuses[server.statusIndex]
+	checkedAt := time.Now().UTC()
+	current.LastCheckedAt = &checkedAt
+	current.LatencyMillis = time.Since(started).Milliseconds()
+	if err != nil {
+		current.Healthy = false
+		current.Error = err.Error()
+	} else {
+		current.Healthy = true
+		current.Error = ""
+	}
+	m.statuses[server.statusIndex] = current
+}
+
+func (m *Manager) statusIndexByNameLocked(name string) int {
+	for i, status := range m.statuses {
+		if status.Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 func formatEmbeddedResource(resource *sdkmcp.ResourceContents) string {
