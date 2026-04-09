@@ -47,6 +47,8 @@ x-agent/
   - daemon audit、API mode ACL、session prefix ACL、per-client rate limiting、token rotation、部署治理说明
 - P2 生态扩展第一阶段收口
   - MCP health、reload、validate，以及 local/remote/daemon 三端统一 MCP 管理接口
+- P2 生态扩展第二阶段收口
+  - provider 从 Anthropic-only 扩到 `anthropic / openai / azure-openai`
 
 更完整的能力说明见：
 
@@ -80,14 +82,13 @@ x-agent/
 
 ### P2 生态扩展
 
-- provider 扩展
 - hooks 向事件总线演进
 - tool / runtime 插件化
 
 ## 推荐执行顺序
 
-1. 扩 provider 生态
-2. 继续做 hooks 事件总线和 tool/runtime 插件化
+1. 继续做 hooks 事件总线
+2. 再做 tool/runtime 插件化
 
 ## 快速开始
 

@@ -30,6 +30,7 @@ Guidelines:
 - Keep final user-facing answers concise and practical.`
 
 type Config struct {
+	Provider                   string
 	APIKey                     string
 	BaseURL                    string
 	Version                    string
@@ -87,8 +88,10 @@ type Config struct {
 }
 
 type fileConfig struct {
+	Provider                   *string  `json:"provider,omitempty"`
 	APIKey                     *string  `json:"api_key,omitempty"`
 	BaseURL                    *string  `json:"base_url,omitempty"`
+	APIVersion                 *string  `json:"api_version,omitempty"`
 	AnthropicVersion           *string  `json:"anthropic_version,omitempty"`
 	Model                      *string  `json:"model,omitempty"`
 	MaxTurns                   *int     `json:"max_turns,omitempty"`
@@ -216,8 +219,10 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	logLevelValue := cfg.LogLevel.String()
 	debugDefault := cfg.LogLevel == diag.LevelDebug
 
-	fs.StringVar(&cfg.Model, "model", cfg.Model, "Anthropic model to use")
-	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL, "Anthropic API base URL")
+	fs.StringVar(&cfg.Provider, "provider", cfg.Provider, "Model provider to use: anthropic, openai, or azure-openai")
+	fs.StringVar(&cfg.APIKey, "api-key", cfg.APIKey, "API key for the selected provider")
+	fs.StringVar(&cfg.Model, "model", cfg.Model, "Model or deployment name to use")
+	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL, "Base URL for the selected provider API")
 	fs.StringVar(&cfg.Version, "anthropic-version", cfg.Version, "Anthropic API version header")
 	fs.IntVar(&cfg.MaxTurns, "max-turns", cfg.MaxTurns, "Maximum agentic turns per user prompt")
 	fs.IntVar(&cfg.MaxTokens, "max-tokens", cfg.MaxTokens, "Max output tokens per model request")
@@ -342,8 +347,8 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 		cfg.Print = true
 	}
 
-	if strings.TrimSpace(cfg.APIKey) == "" && (cfg.Daemon || strings.TrimSpace(cfg.RemoteURL) == "") {
-		return Config{}, fmt.Errorf("ANTHROPIC_API_KEY is required")
+	if err := validateProviderConfig(cfg); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil
@@ -351,6 +356,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 
 func defaultConfig() Config {
 	return Config{
+		Provider:             "anthropic",
 		BaseURL:              "https://api.anthropic.com",
 		Version:              "2023-06-01",
 		Model:                "claude-sonnet-4-5",
@@ -371,8 +377,10 @@ func defaultConfig() Config {
 }
 
 func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir string) {
+	applyString(&cfg.Provider, file.Provider)
 	applyString(&cfg.APIKey, file.APIKey)
 	applyString(&cfg.BaseURL, file.BaseURL)
+	applyString(&cfg.Version, file.APIVersion)
 	applyString(&cfg.Version, file.AnthropicVersion)
 	applyString(&cfg.Model, file.Model)
 	applyInt(&cfg.MaxTurns, file.MaxTurns)
@@ -478,17 +486,21 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 }
 
 func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, bool)) error {
-	if value, ok := lookup("ANTHROPIC_API_KEY"); ok {
+	if value, ok := lookup("XXX_CODE_PROVIDER"); ok {
+		cfg.Provider = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_API_KEY"); ok {
 		cfg.APIKey = strings.TrimSpace(value)
 	}
-	if value, ok := lookup("XXX_CODE_MODEL"); ok {
-		cfg.Model = strings.TrimSpace(value)
-	}
-	if value, ok := lookup("ANTHROPIC_BASE_URL"); ok {
+	if value, ok := lookup("XXX_CODE_BASE_URL"); ok {
 		cfg.BaseURL = strings.TrimSpace(value)
 	}
-	if value, ok := lookup("ANTHROPIC_VERSION"); ok {
+	if value, ok := lookup("XXX_CODE_API_VERSION"); ok {
 		cfg.Version = strings.TrimSpace(value)
+	}
+	applyProviderEnvConfig(cfg, lookup)
+	if value, ok := lookup("XXX_CODE_MODEL"); ok {
+		cfg.Model = strings.TrimSpace(value)
 	}
 	if value, ok := lookup("XXX_CODE_LISTEN"); ok {
 		cfg.DaemonListenAddr = strings.TrimSpace(value)
@@ -574,6 +586,69 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 		}
 	}
 	return nil
+}
+
+func applyProviderEnvConfig(cfg *Config, lookup func(string) (string, bool)) {
+	switch strings.TrimSpace(strings.ToLower(cfg.Provider)) {
+	case "", "anthropic":
+		if value, ok := lookup("ANTHROPIC_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("ANTHROPIC_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("ANTHROPIC_VERSION"); ok {
+			cfg.Version = strings.TrimSpace(value)
+		}
+	case "openai":
+		if value, ok := lookup("OPENAI_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("OPENAI_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		}
+	case "azure-openai", "azure_openai", "azure":
+		if value, ok := lookup("AZURE_OPENAI_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		} else if value, ok := lookup("OPENAI_API_KEY"); ok {
+			cfg.APIKey = strings.TrimSpace(value)
+		}
+		if value, ok := lookup("AZURE_OPENAI_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		} else if value, ok := lookup("OPENAI_BASE_URL"); ok {
+			cfg.BaseURL = strings.TrimSpace(value)
+		}
+	}
+}
+
+func validateProviderConfig(cfg Config) error {
+	if !(cfg.Daemon || strings.TrimSpace(cfg.RemoteURL) == "") {
+		return nil
+	}
+
+	provider := strings.TrimSpace(strings.ToLower(cfg.Provider))
+	switch provider {
+	case "", "anthropic":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("ANTHROPIC_API_KEY or XXX_CODE_API_KEY is required for provider anthropic")
+		}
+		return nil
+	case "openai":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("OPENAI_API_KEY or XXX_CODE_API_KEY is required for provider openai")
+		}
+		return nil
+	case "azure-openai", "azure_openai", "azure":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("AZURE_OPENAI_API_KEY, OPENAI_API_KEY, or XXX_CODE_API_KEY is required for provider azure-openai")
+		}
+		if strings.TrimSpace(cfg.BaseURL) == "" {
+			return fmt.Errorf("AZURE_OPENAI_BASE_URL, OPENAI_BASE_URL, or XXX_CODE_BASE_URL is required for provider azure-openai")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported provider %q; expected anthropic, openai, or azure-openai", cfg.Provider)
+	}
 }
 
 func resolveConfigPath(args []string, lookup func(string) (string, bool), workingDir string) (string, error) {

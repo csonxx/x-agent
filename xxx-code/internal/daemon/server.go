@@ -27,7 +27,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
-	"github.com/caowenhua/x-agent/xxx-code/internal/provider/anthropic"
+	"github.com/caowenhua/x-agent/xxx-code/internal/provider"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
@@ -200,7 +200,7 @@ func New(cfg config.Config, out, errOut io.Writer, providerFactory ProviderFacto
 	}
 	if providerFactory == nil {
 		providerFactory = func(cfg config.Config) engine.Provider {
-			return anthropic.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Version)
+			return provider.New(cfg)
 		}
 	}
 	auditFile := strings.TrimSpace(cfg.DaemonAuditFile)

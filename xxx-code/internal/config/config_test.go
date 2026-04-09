@@ -133,6 +133,64 @@ func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 	}
 }
 
+func TestLoadArgsSupportsOpenAIProviderEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"XXX_CODE_PROVIDER": "openai",
+		"OPENAI_API_KEY":    "openai-key",
+		"OPENAI_BASE_URL":   "https://example.openai.test/v1",
+	}
+
+	cfg, err := LoadArgs([]string{"--model", "gpt-4.1"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "openai" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "openai-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "https://example.openai.test/v1" {
+		t.Fatalf("unexpected base url: %q", cfg.BaseURL)
+	}
+}
+
+func TestLoadArgsSupportsAzureOpenAIProviderEnv(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"XXX_CODE_PROVIDER":     "azure-openai",
+		"AZURE_OPENAI_API_KEY":  "azure-key",
+		"AZURE_OPENAI_BASE_URL": "https://example-resource.openai.azure.com",
+	}
+
+	cfg, err := LoadArgs([]string{"--model", "deployment-name"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "azure-openai" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "azure-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "https://example-resource.openai.azure.com" {
+		t.Fatalf("unexpected base url: %q", cfg.BaseURL)
+	}
+}
+
+func TestLoadArgsRejectsUnknownProvider(t *testing.T) {
+	dir := t.TempDir()
+	_, err := LoadArgs([]string{"--provider", "mystery"}, lookupFromMap(map[string]string{
+		"XXX_CODE_API_KEY": "test-key",
+	}), dir)
+	if err == nil {
+		t.Fatal("expected unknown provider to fail")
+	}
+}
+
 func lookupFromMap(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]

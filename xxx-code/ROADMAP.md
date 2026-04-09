@@ -75,8 +75,9 @@
 - [x] MCP 管理增强
   - 已补 server health、reload、配置校验
   - 已补本地 REPL、remote REPL、daemon API 的统一入口
-- [ ] provider 扩展
-  - OpenAI / Azure / 本地模型
+- [x] provider 扩展
+  - 已补 `anthropic / openai / azure-openai`
+  - 已补统一 provider 选择配置与 OpenAI-compatible streaming/tool calling
 - [ ] hooks 向事件总线演进
   - 不只是 shell hook
 - [ ] tool / runtime 插件化
@@ -95,8 +96,8 @@
 当前默认推进顺序：
 
 1. 进入 P2 生态与扩展
-2. 继续做 provider 扩展
-3. 再继续做 hooks / plugin 化
+2. 继续做 hooks 事件总线演进
+3. 再继续做 tool / runtime plugin 化
 
 ## 完成标准
 

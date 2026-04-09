@@ -19,7 +19,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
-	"github.com/caowenhua/x-agent/xxx-code/internal/provider/anthropic"
+	"github.com/caowenhua/x-agent/xxx-code/internal/provider"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
@@ -70,8 +70,8 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 	)
 	app.registry = registry
 
-	provider := anthropic.NewClient(cfg.APIKey, cfg.BaseURL, cfg.Version)
-	app.runner = engine.NewRunner(provider, registry, engine.RunnerConfig{
+	modelProvider := provider.New(cfg)
+	app.runner = engine.NewRunner(modelProvider, registry, engine.RunnerConfig{
 		Model:               cfg.Model,
 		SystemPrompt:        cfg.SystemPrompt,
 		MaxTokens:           cfg.MaxTokens,

@@ -4,6 +4,7 @@
 
 当前版本已经包含：
 
+- 多 provider 选择（anthropic / openai / azure-openai）
 - Anthropic Messages API 适配
 - 多轮 agent loop
 - 自动上下文压缩与 context budget 保护
@@ -128,7 +129,14 @@ go run ./cmd/xxx-code --config /path/to/config.json
 
 比较常用的环境变量有：
 
+- `XXX_CODE_PROVIDER`
+- `XXX_CODE_API_KEY`
+- `XXX_CODE_BASE_URL`
 - `ANTHROPIC_API_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `AZURE_OPENAI_API_KEY`
+- `AZURE_OPENAI_BASE_URL`
 - `XXX_CODE_MODEL`
 - `XXX_CODE_REMOTE_URL`
 - `XXX_CODE_REMOTE_TOKEN`
@@ -148,10 +156,67 @@ go run ./cmd/xxx-code --config /path/to/config.json
 
 比较常用的诊断 flag 有：
 
+- `--provider anthropic|openai|azure-openai`
+- `--api-key ...`
 - `--log-level info|debug|error`
 - `--debug`
 - `--log-file .xxx-code/xxx-code.log`
 - `--config .xxx-code/config.json`
+
+## Provider
+
+`xxx-code` 现在支持三种 provider：
+
+- `anthropic`
+- `openai`
+- `azure-openai`
+
+默认还是 `anthropic`。你可以用 config、env 或 flag 切换：
+
+```bash
+go run ./cmd/xxx-code \
+  --provider openai \
+  --model gpt-4.1 \
+  --api-key "$OPENAI_API_KEY"
+```
+
+Anthropic 兼容当前默认配置：
+
+```bash
+export ANTHROPIC_API_KEY=...
+go run ./cmd/xxx-code --provider anthropic --model claude-sonnet-4-5
+```
+
+OpenAI 直接走 Chat Completions：
+
+```bash
+export OPENAI_API_KEY=...
+go run ./cmd/xxx-code --provider openai --model gpt-4.1
+```
+
+如果你要接兼容的 OpenAI endpoint，也可以显式指定：
+
+```bash
+go run ./cmd/xxx-code \
+  --provider openai \
+  --base-url https://api.openai.com/v1 \
+  --model gpt-4.1
+```
+
+Azure OpenAI 走当前 v1 OpenAI-compatible base URL 方案：
+
+```bash
+export AZURE_OPENAI_API_KEY=...
+export AZURE_OPENAI_BASE_URL=https://YOUR-RESOURCE.openai.azure.com/openai/v1
+
+go run ./cmd/xxx-code \
+  --provider azure-openai \
+  --model YOUR_DEPLOYMENT_NAME
+```
+
+如果 `--base-url` 传的是 Azure 资源根地址，runtime 也会自动补 `/openai/v1`。
+
+目前这三种 provider 都已经接进同一套 tool-calling 主循环；`openai` 和 `azure-openai` 也支持流式文本输出与工具调用增量拼装。
 
 ## 交互模式
 
