@@ -13,6 +13,7 @@
 - 本地工具调用
 - 本地/远程 MCP 客户端与动态工具桥接（stdio / http / sse / ws）
 - MCP health / reload / validate 管理能力
+- 插件目录、manifest 与命令型插件工具桥接
 - 主会话流式文本输出
 - REPL、TUI 与单次执行模式
 - HTTP daemon、远程 bridge 与 session API
@@ -39,6 +40,7 @@ xxx-code/
   internal/remote/           daemon bridge client、远程 REPL
   internal/engine/           核心运行时、消息模型、主循环、agent 管理
   internal/mcp/              MCP 配置加载、stdio/http/sse client、动态 tool bridge
+  internal/plugins/          插件 manifest、命令型工具桥接、状态管理
   internal/persist/          session、agent 与 workflow 状态持久化
   internal/provider/         模型提供方适配
   internal/tools/            内建工具
@@ -71,10 +73,13 @@ xxx-code/
 - `mcp_health`
 - `mcp_reload`
 - `mcp_validate`
+- `plugin__<plugin>__<tool>` 动态插件 tools
+- `list_plugins`
+- `reload_plugins`
 
 ## 运行前准备
 
-设置 Anthropic API Key：
+先按你选的 provider 设置对应 API key。例如默认 Anthropic：
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -151,6 +156,7 @@ go run ./cmd/xxx-code --config /path/to/config.json
 - `XXX_CODE_DAEMON_RATE_LIMIT_PER_MINUTE`
 - `XXX_CODE_DAEMON_RATE_LIMIT_BURST`
 - `XXX_CODE_HOOK_EVENT_FILE`
+- `XXX_CODE_PLUGIN_DIR`
 - `XXX_CODE_LOG_LEVEL`
 - `XXX_CODE_LOG_FILE`
 - `XXX_CODE_CONFIG`
@@ -159,6 +165,7 @@ go run ./cmd/xxx-code --config /path/to/config.json
 
 - `--provider anthropic|openai|azure-openai`
 - `--api-key ...`
+- `--plugin-dir .xxx-code/plugins`
 - `--hook-event-file .xxx-code/hooks/events.jsonl`
 - `--log-level info|debug|error`
 - `--debug`
@@ -235,6 +242,8 @@ REPL 内支持：
 - `:workflow <workflow-id>`
 - `:workflow-tasks <workflow-id> [status|name=<task>]`
 - `:workflow-resume <workflow-id> [failed|task...]`
+- `:plugins`
+- `:plugins-reload`
 - `:mcp`
 - `:mcp-health [server]`
 - `:mcp-reload`
@@ -319,7 +328,7 @@ go run ./cmd/xxx-code \
   --listen 127.0.0.1:7331 \
   --daemon-token dev-secret \
   --daemon-audit-file .xxx-code/daemon/audit.jsonl \
-  --daemon-allow-modes sessions_read,sessions_write,turns,agents,workflows,audit \
+  --daemon-allow-modes sessions_read,sessions_write,turns,introspection,plugins,mcp,agents,workflows,audit \
   --daemon-allow-session-prefix team- \
   --daemon-rate-limit-per-minute 120 \
   --daemon-rate-limit-burst 20
@@ -360,6 +369,8 @@ go run ./cmd/xxx-code \
 - `POST /v1/sessions/{id}/turns/stream`
 - `GET /v1/sessions/{id}/policy`
 - `GET /v1/sessions/{id}/hooks`
+- `GET /v1/sessions/{id}/plugins`
+- `POST /v1/sessions/{id}/plugins/reload`
 - `GET /v1/sessions/{id}/mcp`
 - `GET /v1/sessions/{id}/mcp/health?server=name`
 - `POST /v1/sessions/{id}/mcp/reload`
@@ -528,6 +539,8 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:session`
 - `:history [n]`
 - `:audit [n]`
+- `:plugins`
+- `:plugins-reload`
 - `:mcp`
 - `:mcp-health [server]`
 - `:mcp-reload`
@@ -725,6 +738,84 @@ go run ./cmd/xxx-code \
 ```
 
 REPL 里可以用 `:hooks` 查看当前配置。
+
+## Plugins
+
+`xxx-code` 现在支持从插件目录加载命令型工具。默认会自动发现：
+
+```text
+.xxx-code/plugins
+```
+
+也可以显式指定：
+
+```bash
+go run ./cmd/xxx-code --plugin-dir /path/to/plugins
+```
+
+插件 manifest 当前支持两种命名方式：
+
+- `<plugin-dir>/<name>/plugin.json`
+- `<plugin-dir>/**/*.plugin.json`
+
+一个最小可运行示例：
+
+```json
+{
+  "name": "echoer",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo stdin JSON back to stdout",
+      "input_schema": {
+        "type": "object"
+      },
+      "command": "./tool.sh"
+    }
+  ]
+}
+```
+
+插件工具会自动桥接成：
+
+```text
+plugin__echoer__echo
+```
+
+也就是说，模型看到的仍然是一组普通 tools，不需要主循环做分叉。插件命令执行时会把 tool input JSON 写到 stdin，并注入这些环境变量：
+
+- `XXX_CODE_PLUGIN_NAME`
+- `XXX_CODE_PLUGIN_TOOL`
+- `XXX_CODE_WORKING_DIR`
+
+如果插件 stdout 直接输出文本，runtime 会把它当普通 tool result；如果 stdout 输出这种 JSON：
+
+```json
+{
+  "content": "done",
+  "is_error": false
+}
+```
+
+runtime 会按结构化 tool result 处理。
+
+本地 REPL 和 remote REPL 都支持：
+
+- `:plugins`
+- `:plugins-reload`
+
+daemon API 对应是：
+
+- `GET /v1/sessions/{id}/plugins`
+- `POST /v1/sessions/{id}/plugins/reload`
+
+同时模型侧还能直接用：
+
+- `list_plugins`
+- `reload_plugins`
+
+当前插件工具是“受信任扩展”模型。它们仍然会被 `--allow-tools / --deny-tools` 约束，但插件命令本身是宿主机进程，所以更适合放在你自己控制的目录和代码里。
 
 ## MCP
 
@@ -988,7 +1079,7 @@ go run ./cmd/xxx-code \
   --allow-tools read_file,glob,grep,bash \
   --allow-bash-prefix "git status,go test" \
   --daemon-audit-file .xxx-code/daemon/audit.jsonl \
-  --daemon-allow-modes sessions_read,sessions_write,turns,agents,workflows,audit \
+  --daemon-allow-modes sessions_read,sessions_write,turns,introspection,plugins,mcp,agents,workflows,audit \
   --daemon-rate-limit-per-minute 120 \
   --resume \
   --session-file /path/to/project/.xxx-code/session.json \

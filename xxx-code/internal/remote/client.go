@@ -77,6 +77,23 @@ type MCPSummary struct {
 	Statuses    []mcpruntime.ServerStatus `json:"statuses"`
 }
 
+type PluginSummary struct {
+	PluginDir   string                `json:"plugin_dir,omitempty"`
+	PluginCount int                   `json:"plugin_count"`
+	ToolCount   int                   `json:"tool_count"`
+	Statuses    []pluginStatusPayload `json:"statuses"`
+}
+
+type pluginStatusPayload struct {
+	Name         string   `json:"name"`
+	Version      string   `json:"version,omitempty"`
+	ManifestPath string   `json:"manifest_path,omitempty"`
+	Status       string   `json:"status"`
+	ToolNames    []string `json:"tool_names,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"`
+	Error        string   `json:"error,omitempty"`
+}
+
 type HookConfig struct {
 	BeforeTool string `json:"before_tool,omitempty"`
 	AfterTool  string `json:"after_tool,omitempty"`
@@ -372,6 +389,26 @@ func (c *Client) GetHooks(ctx context.Context, sessionID string) (HookConfig, er
 		return HookConfig{}, err
 	}
 	return response.Hooks, nil
+}
+
+func (c *Client) GetPlugins(ctx context.Context, sessionID string) (PluginSummary, error) {
+	var response struct {
+		Plugins PluginSummary `json:"plugins"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/plugins", nil, &response); err != nil {
+		return PluginSummary{}, err
+	}
+	return response.Plugins, nil
+}
+
+func (c *Client) ReloadPlugins(ctx context.Context, sessionID string) (PluginSummary, error) {
+	var response struct {
+		Plugins PluginSummary `json:"plugins"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/plugins/reload", map[string]any{}, &response); err != nil {
+		return PluginSummary{}, err
+	}
+	return response.Plugins, nil
 }
 
 func (c *Client) GetMCP(ctx context.Context, sessionID string) (MCPSummary, error) {

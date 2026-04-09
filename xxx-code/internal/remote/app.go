@@ -137,6 +137,8 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":session                  print remote session summary")
 		fmt.Fprintln(a.out, ":history [n]              print the latest n remote messages (default 10)")
 		fmt.Fprintln(a.out, ":audit [n]                print the latest n remote audit events for this session (default 20)")
+		fmt.Fprintln(a.out, ":plugins                  print remote plugin status")
+		fmt.Fprintln(a.out, ":plugins-reload           reload remote plugins")
 		fmt.Fprintln(a.out, ":mcp                      print remote MCP status")
 		fmt.Fprintln(a.out, ":mcp-health [server]      ping remote MCP servers and print live health")
 		fmt.Fprintln(a.out, ":mcp-reload               reload the remote MCP config and reconnect servers")
@@ -187,6 +189,14 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		}
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			return a.client.ListSessionAudit(ctx, a.sessionID, limit)
+		})
+	case ":plugins":
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.GetPlugins(ctx, a.sessionID)
+		})
+	case ":plugins-reload":
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ReloadPlugins(ctx, a.sessionID)
 		})
 	case ":mcp":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {

@@ -51,6 +51,8 @@ x-agent/
   - provider 从 Anthropic-only 扩到 `anthropic / openai / azure-openai`
 - P2 生态扩展第三阶段收口
   - hooks 从 shell command 扩成可组合事件总线，并支持 JSONL event sink
+- P2 生态扩展第四阶段收口
+  - 插件目录、manifest、命令型插件工具桥接、本地/远程 reload 与查看入口
 
 更完整的能力说明见：
 
@@ -84,12 +86,16 @@ x-agent/
 
 ### P2 生态扩展
 
-- tool / runtime 插件化
+- 已完成
+  - MCP 管理增强
+  - provider 扩展
+  - hooks 事件总线
+  - tool / runtime 插件化
 
 ## 推荐执行顺序
 
-1. 继续做 tool/runtime 插件化
-2. 再往更通用扩展体系推进
+1. 当前 roadmap 主线已经全部收口
+2. 后续按更通用的扩展体系继续推进
 
 ## 快速开始
 

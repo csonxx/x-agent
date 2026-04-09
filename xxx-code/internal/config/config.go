@@ -60,6 +60,7 @@ type Config struct {
 	WorkingDir                 string
 	SessionFile                string
 	MCPConfigFile              string
+	PluginDir                  string
 	ReadRoots                  []string
 	WriteRoots                 []string
 	AllowedTools               []string
@@ -120,6 +121,7 @@ type fileConfig struct {
 	WorkingDir                 *string  `json:"cwd,omitempty"`
 	SessionFile                *string  `json:"session_file,omitempty"`
 	MCPConfigFile              *string  `json:"mcp_config,omitempty"`
+	PluginDir                  *string  `json:"plugin_dir,omitempty"`
 	AllowRead                  []string `json:"allow_read,omitempty"`
 	AllowWrite                 []string `json:"allow_write,omitempty"`
 	AllowTools                 []string `json:"allow_tools,omitempty"`
@@ -156,6 +158,7 @@ type rawOptions struct {
 	daemonAuditFile            string
 	remoteTokenFile            string
 	mcpConfigFile              string
+	pluginDir                  string
 	systemPromptFile           string
 	readRoots                  []string
 	writeRoots                 []string
@@ -263,13 +266,14 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	daemonAuditFileFlag := fs.String("daemon-audit-file", raw.daemonAuditFile, "Path to the daemon JSONL audit log; defaults to <daemon-dir>/audit.jsonl")
 	remoteTokenFileFlag := fs.String("remote-token-file", raw.remoteTokenFile, "Path to a bearer token file used by the remote bridge; reread on each request")
 	mcpConfigFlag := fs.String("mcp-config", raw.mcpConfigFile, "Path to an MCP config file; defaults to .mcp.json in the working directory when present")
+	pluginDirFlag := fs.String("plugin-dir", raw.pluginDir, "Path to a plugin directory; defaults to .xxx-code/plugins in the working directory when present")
 	readRootsFlag := fs.String("allow-read", joinCSV(raw.readRoots), "Comma-separated read roots; the working directory is always included")
 	writeRootsFlag := fs.String("allow-write", joinCSV(raw.writeRoots), "Comma-separated write roots; the working directory is always included unless --read-only is set")
 	allowToolsFlag := fs.String("allow-tools", joinCSV(raw.allowedTools), "Comma-separated tool allowlist; when set, only these tools may run")
 	denyToolsFlag := fs.String("deny-tools", joinCSV(raw.blockedTools), "Comma-separated tool denylist")
 	allowBashPrefixFlag := fs.String("allow-bash-prefix", joinCSV(raw.bashAllow), "Comma-separated allowed bash command prefixes")
 	denyBashPrefixFlag := fs.String("deny-bash-prefix", joinCSV(raw.bashDeny), "Comma-separated blocked bash command prefixes")
-	daemonAllowModesFlag := fs.String("daemon-allow-modes", joinCSV(raw.daemonAllowModes), "Comma-separated daemon API mode allowlist: sessions_read,sessions_write,turns,introspection,mcp,agents,workflows,audit,save")
+	daemonAllowModesFlag := fs.String("daemon-allow-modes", joinCSV(raw.daemonAllowModes), "Comma-separated daemon API mode allowlist: sessions_read,sessions_write,turns,introspection,plugins,mcp,agents,workflows,audit,save")
 	daemonDenyModesFlag := fs.String("daemon-deny-modes", joinCSV(raw.daemonDenyModes), "Comma-separated daemon API mode denylist")
 	daemonAllowSessionPrefixFlag := fs.String("daemon-allow-session-prefix", joinCSV(raw.daemonAllowSessionPrefixes), "Comma-separated session ID prefixes that the daemon may access")
 	daemonDenySessionPrefixFlag := fs.String("daemon-deny-session-prefix", joinCSV(raw.daemonDenySessionPrefixes), "Comma-separated session ID prefixes that the daemon must reject")
@@ -316,6 +320,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 		cfg.ConfigFile = resolvePath(currentWD, cfg.ConfigFile)
 	}
 	cfg.MCPConfigFile = resolveOptionalPath(cfg.WorkingDir, *mcpConfigFlag)
+	cfg.PluginDir = resolveOptionalPath(cfg.WorkingDir, *pluginDirFlag)
 	cfg.ReadRoots = appendUniquePaths([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *readRootsFlag)...)
 	cfg.WriteRoots = appendUniquePaths([]string{cfg.WorkingDir}, parseRoots(cfg.WorkingDir, *writeRootsFlag)...)
 	cfg.AllowedTools = parseCSV(*allowToolsFlag)
@@ -440,6 +445,9 @@ func applyFileConfig(cfg *Config, raw *rawOptions, file fileConfig, configDir st
 	if file.MCPConfigFile != nil {
 		raw.mcpConfigFile = strings.TrimSpace(*file.MCPConfigFile)
 	}
+	if file.PluginDir != nil {
+		raw.pluginDir = strings.TrimSpace(*file.PluginDir)
+	}
 	if file.SystemPromptFile != nil {
 		raw.systemPromptFile = strings.TrimSpace(*file.SystemPromptFile)
 	}
@@ -533,6 +541,9 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 	}
 	if value, ok := lookup("XXX_CODE_MCP_CONFIG"); ok {
 		raw.mcpConfigFile = strings.TrimSpace(value)
+	}
+	if value, ok := lookup("XXX_CODE_PLUGIN_DIR"); ok {
+		raw.pluginDir = strings.TrimSpace(value)
 	}
 	if value, ok := lookup("XXX_CODE_SESSION_FILE"); ok {
 		raw.sessionFile = strings.TrimSpace(value)

@@ -27,6 +27,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
+	pluginruntime "github.com/caowenhua/x-agent/xxx-code/internal/plugins"
 	"github.com/caowenhua/x-agent/xxx-code/internal/provider"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
@@ -55,6 +56,7 @@ type managedSession struct {
 	session         *engine.Session
 	workflowManager *tools.WorkflowManager
 	mcpManager      *mcpruntime.Manager
+	pluginManager   *pluginruntime.Manager
 	audit           *auditLogger
 	out             io.Writer
 	errOut          io.Writer
@@ -134,6 +136,13 @@ type sessionMCPSummary struct {
 	ServerCount int                       `json:"server_count"`
 	ToolCount   int                       `json:"tool_count"`
 	Statuses    []mcpruntime.ServerStatus `json:"statuses"`
+}
+
+type sessionPluginSummary struct {
+	PluginDir   string                 `json:"plugin_dir,omitempty"`
+	PluginCount int                    `json:"plugin_count"`
+	ToolCount   int                    `json:"tool_count"`
+	Statuses    []pluginruntime.Status `json:"statuses"`
 }
 
 type sessionHookConfig struct {
@@ -438,6 +447,8 @@ func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 		mode = daemonModeSave
 	case parts[1] == "policy", parts[1] == "hooks":
 		mode = daemonModeIntrospection
+	case parts[1] == "plugins":
+		mode = daemonModePlugins
 	case parts[1] == "mcp":
 		mode = daemonModeMCP
 	case parts[1] == "agents":
@@ -511,6 +522,8 @@ func (s *Server) handleSessionRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"hooks": session.hookConfig()})
+	case "plugins":
+		s.handlePluginRoutes(w, r, session, parts[2:])
 	case "mcp":
 		s.handleMCPRoutes(w, r, session, parts[2:])
 	case "agents":
@@ -810,6 +823,31 @@ func (s *Server) handleWorkflowRoutes(w http.ResponseWriter, r *http.Request, se
 			"tasks":    tasks,
 			"agents":   agents,
 		})
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (s *Server) handlePluginRoutes(w http.ResponseWriter, r *http.Request, session *managedSession, parts []string) {
+	if len(parts) == 0 {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plugins": session.pluginSummary()})
+		return
+	}
+	if len(parts) == 1 && parts[0] == "reload" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		summary, err := session.reloadPlugins(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plugins": summary})
 		return
 	}
 	http.NotFound(w, r)
@@ -1155,6 +1193,15 @@ func (s *Server) newManagedSession(ctx context.Context, id, file string, resume 
 	}
 	ms.mcpManager = manager
 
+	pluginManager, err := pluginruntime.Start(ctx, ms.registry, pluginruntime.Options{
+		WorkingDir: cfg.WorkingDir,
+		PluginDir:  cfg.PluginDir,
+	})
+	if err != nil {
+		return nil, err
+	}
+	ms.pluginManager = pluginManager
+
 	if resume {
 		if err := ms.resume(); err != nil {
 			_ = ms.close()
@@ -1211,6 +1258,20 @@ func (m *managedSession) mcpSummary() sessionMCPSummary {
 	return summary
 }
 
+func (m *managedSession) pluginSummary() sessionPluginSummary {
+	summary := sessionPluginSummary{
+		Statuses: []pluginruntime.Status{},
+	}
+	if m == nil || m.pluginManager == nil {
+		return summary
+	}
+	summary.PluginDir = m.pluginManager.PluginDir()
+	summary.PluginCount = m.pluginManager.PluginCount()
+	summary.ToolCount = m.pluginManager.ToolCount()
+	summary.Statuses = m.pluginManager.Statuses()
+	return summary
+}
+
 func (m *managedSession) hookConfig() sessionHookConfig {
 	if m == nil {
 		return sessionHookConfig{}
@@ -1253,6 +1314,29 @@ func (m *managedSession) reloadMCP(ctx context.Context) (sessionMCPSummary, erro
 		return sessionMCPSummary{}, err
 	}
 	return m.mcpSummary(), nil
+}
+
+func (m *managedSession) reloadPlugins(ctx context.Context) (sessionPluginSummary, error) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	if m.pluginManager == nil {
+		manager, err := pluginruntime.Start(ctx, m.registry, pluginruntime.Options{
+			WorkingDir: m.config.WorkingDir,
+			PluginDir:  m.config.PluginDir,
+		})
+		if err != nil {
+			return sessionPluginSummary{}, err
+		}
+		m.pluginManager = manager
+	} else if err := m.pluginManager.Reload(ctx); err != nil {
+		return sessionPluginSummary{}, err
+	}
+
+	if err := m.save(); err != nil {
+		return sessionPluginSummary{}, err
+	}
+	return m.pluginSummary(), nil
 }
 
 func (m *managedSession) validateMCP(configFile string) mcpruntime.ValidationReport {
@@ -1387,6 +1471,11 @@ func (m *managedSession) close() error {
 	}
 	if m.mcpManager != nil {
 		if err := m.mcpManager.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if m.pluginManager != nil {
+		if err := m.pluginManager.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}

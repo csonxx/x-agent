@@ -210,6 +210,21 @@ func TestLoadArgsParsesHookEventFile(t *testing.T) {
 	}
 }
 
+func TestLoadArgsParsesPluginDir(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := LoadArgs([]string{
+		"--plugin-dir", "runtime/plugins",
+	}, lookupFromMap(map[string]string{
+		"ANTHROPIC_API_KEY": "test-key",
+	}), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PluginDir != filepath.Join(dir, "runtime", "plugins") {
+		t.Fatalf("unexpected plugin dir: %q", cfg.PluginDir)
+	}
+}
+
 func lookupFromMap(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]

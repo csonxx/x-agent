@@ -289,6 +289,50 @@ func TestClientCanValidateReloadAndHealthCheckMCP(t *testing.T) {
 	}
 }
 
+func TestClientCanInspectAndReloadPlugins(t *testing.T) {
+	cfg := newTestConfig(t)
+	writeRemotePlugin(t, cfg.WorkingDir, "echoer", "#!/bin/sh\nprintf 'echo plugin'\n")
+
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "remote-plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plugins, err := client.GetPlugins(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plugins.PluginCount != 1 || plugins.ToolCount != 1 {
+		t.Fatalf("expected one loaded plugin, got %+v", plugins)
+	}
+	if len(plugins.Statuses) != 1 || plugins.Statuses[0].Name != "echoer" {
+		t.Fatalf("unexpected plugin statuses: %+v", plugins)
+	}
+
+	if err := os.RemoveAll(filepath.Join(cfg.WorkingDir, ".xxx-code", "plugins", "echoer")); err != nil {
+		t.Fatal(err)
+	}
+	writeRemotePlugin(t, cfg.WorkingDir, "writer", "#!/bin/sh\nprintf 'writer plugin'\n")
+
+	reloaded, err := client.ReloadPlugins(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.PluginCount != 1 || len(reloaded.Statuses) != 1 || reloaded.Statuses[0].Name != "writer" {
+		t.Fatalf("expected reloaded plugin summary, got %+v", reloaded)
+	}
+}
+
 func TestClientCanListSessionAudit(t *testing.T) {
 	client, cleanup := newTestClient(t)
 	defer cleanup()
@@ -628,6 +672,29 @@ func newTestConfig(t *testing.T) config.Config {
 		ReadRoots:         []string{dir},
 		WriteRoots:        []string{dir},
 		BashEnabled:       true,
+	}
+}
+
+func writeRemotePlugin(t *testing.T, workingDir, pluginName, script string) {
+	t.Helper()
+	pluginDir := filepath.Join(workingDir, ".xxx-code", "plugins", pluginName)
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "tool.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{
+  "name": "` + pluginName + `",
+  "tools": [{
+    "name": "echo",
+    "description": "Echo plugin",
+    "input_schema": {"type": "object"},
+    "command": "./tool.sh"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

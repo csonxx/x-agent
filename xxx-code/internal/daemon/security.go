@@ -21,6 +21,7 @@ const (
 	daemonModeSessionsWrite = "sessions_write"
 	daemonModeTurns         = "turns"
 	daemonModeIntrospection = "introspection"
+	daemonModePlugins       = "plugins"
 	daemonModeMCP           = "mcp"
 	daemonModeAgents        = "agents"
 	daemonModeWorkflows     = "workflows"

@@ -80,8 +80,8 @@
   - 已补统一 provider 选择配置与 OpenAI-compatible streaming/tool calling
 - [x] hooks 向事件总线演进
   - 已补 hooks bus，可同时分发到 shell hook 和 JSONL event sink
-- [ ] tool / runtime 插件化
-  - 降低后续扩展成本
+- [x] tool / runtime 插件化
+  - 已补插件目录、manifest、命令型工具桥接、reload、本地/远程查看入口
 
 ## 执行顺序
 
@@ -96,7 +96,7 @@
 当前默认推进顺序：
 
 1. 进入 P2 生态与扩展
-2. 继续做 tool / runtime plugin 化
+2. 当前 roadmap 主线已收口
 3. 再往更通用的扩展体系推进
 
 ## 完成标准

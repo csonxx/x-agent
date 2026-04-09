@@ -19,6 +19,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/hooks"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
+	pluginruntime "github.com/caowenhua/x-agent/xxx-code/internal/plugins"
 	"github.com/caowenhua/x-agent/xxx-code/internal/provider"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
@@ -30,6 +31,7 @@ type App struct {
 	session         *engine.Session
 	workflowManager *tools.WorkflowManager
 	mcpManager      *mcpruntime.Manager
+	pluginManager   *pluginruntime.Manager
 	out             io.Writer
 	errOut          io.Writer
 	saveMu          sync.Mutex
@@ -114,6 +116,9 @@ func New(cfg config.Config, out, errOut io.Writer) *App {
 
 func (a *App) Run(ctx context.Context) (runErr error) {
 	a.logger.Debugf("starting local app mode print=%t tui=%t resume=%t cwd=%s session=%s config=%s", a.config.Print, a.config.TUI, a.config.Resume, a.config.WorkingDir, a.config.SessionFile, a.config.ConfigFile)
+	if err := a.initPlugins(ctx); err != nil {
+		return err
+	}
 	if err := a.initMCP(ctx); err != nil {
 		return err
 	}
@@ -124,6 +129,13 @@ func (a *App) Run(ctx context.Context) (runErr error) {
 				return
 			}
 			fmt.Fprintf(a.errOut, "mcp shutdown error: %v\n", err)
+		}
+		if err := a.closePlugins(); err != nil {
+			if runErr == nil {
+				runErr = err
+				return
+			}
+			fmt.Fprintf(a.errOut, "plugin shutdown error: %v\n", err)
 		}
 	}()
 
@@ -204,6 +216,8 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":workflow <workflow-id>   print one persisted workflow snapshot")
 		fmt.Fprintln(a.out, ":workflow-tasks <id> [status|name=<task>] list persisted workflow tasks")
 		fmt.Fprintln(a.out, ":workflow-resume <id> [failed|task...]    resume a workflow from failed or selected tasks")
+		fmt.Fprintln(a.out, ":plugins                  list loaded plugins and bridged tools")
+		fmt.Fprintln(a.out, ":plugins-reload           reload plugin manifests and bridged tools")
 		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
 		fmt.Fprintln(a.out, ":mcp-health [server]      ping MCP servers and print live health")
 		fmt.Fprintln(a.out, ":mcp-reload               reload the current MCP config and reconnect servers")
@@ -300,6 +314,18 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		}, "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, a.saveSession()
+	case ":plugins":
+		data, _ := json.MarshalIndent(a.currentPluginSummary(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":plugins-reload":
+		if err := a.reloadPlugins(ctx); err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(a.currentPluginSummary(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
 	case ":mcp":
 		data, _ := json.MarshalIndent(a.currentMCPSummary(), "", "  ")
 		fmt.Fprintln(a.out, string(data))
@@ -617,6 +643,72 @@ func (a *App) initMCP(ctx context.Context) error {
 	return nil
 }
 
+func (a *App) initPlugins(ctx context.Context) error {
+	manager, err := pluginruntime.Start(ctx, a.registry, pluginruntime.Options{
+		WorkingDir: a.config.WorkingDir,
+		PluginDir:  a.config.PluginDir,
+	})
+	if err != nil {
+		return err
+	}
+	a.pluginManager = manager
+	if a.pluginManager == nil {
+		return nil
+	}
+	for _, status := range a.pluginManager.Statuses() {
+		switch status.Status {
+		case pluginruntime.StatusLoaded:
+			if a.config.Verbose {
+				fmt.Fprintf(a.errOut, "plugin %s loaded (%d tools)\n", status.Name, len(status.ToolNames))
+			}
+		case pluginruntime.StatusFailed:
+			fmt.Fprintf(a.errOut, "plugin %s failed: %s\n", status.Name, status.Error)
+		}
+		for _, warning := range status.Warnings {
+			fmt.Fprintf(a.errOut, "plugin %s warning: %s\n", status.Name, warning)
+		}
+	}
+	return nil
+}
+
+func (a *App) reloadPlugins(ctx context.Context) error {
+	if a.pluginManager == nil {
+		return a.initPlugins(ctx)
+	}
+	if err := a.pluginManager.Reload(ctx); err != nil {
+		return err
+	}
+	for _, status := range a.pluginManager.Statuses() {
+		switch status.Status {
+		case pluginruntime.StatusFailed:
+			fmt.Fprintf(a.errOut, "plugin %s failed: %s\n", status.Name, status.Error)
+		}
+		for _, warning := range status.Warnings {
+			fmt.Fprintf(a.errOut, "plugin %s warning: %s\n", status.Name, warning)
+		}
+	}
+	return nil
+}
+
+func (a *App) currentPluginSummary() map[string]any {
+	statuses := []pluginruntime.Status{}
+	pluginDir := ""
+	pluginCount := 0
+	toolCount := 0
+	if a.pluginManager != nil {
+		statuses = a.pluginManager.Statuses()
+		pluginDir = a.pluginManager.PluginDir()
+		pluginCount = a.pluginManager.PluginCount()
+		toolCount = a.pluginManager.ToolCount()
+	}
+	return map[string]any{
+		"plugin_dir":   pluginDir,
+		"plugin_count": pluginCount,
+		"tool_count":   toolCount,
+		"statuses":     statuses,
+	}
+}
+
 func (a *App) reloadMCP(ctx context.Context) error {
 	if a.mcpManager == nil {
 		return a.initMCP(ctx)
@@ -653,6 +745,13 @@ func (a *App) currentMCPSummary() map[string]any {
 		"tool_count":   toolCount,
 		"statuses":     statuses,
 	}
+}
+
+func (a *App) closePlugins() error {
+	if a.pluginManager == nil {
+		return nil
+	}
+	return a.pluginManager.Close()
 }
 
 func (a *App) closeMCP() error {
