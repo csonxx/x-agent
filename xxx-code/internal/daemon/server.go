@@ -131,6 +131,19 @@ type mcpValidateRequest struct {
 	ConfigFile string `json:"config_file,omitempty"`
 }
 
+type pluginValidateRequest struct {
+	Source string `json:"source"`
+}
+
+type pluginInstallRequest struct {
+	Source string `json:"source"`
+	Force  bool   `json:"force,omitempty"`
+}
+
+type pluginRemoveRequest struct {
+	Name string `json:"name"`
+}
+
 type sessionMCPSummary struct {
 	ConfigPath  string                    `json:"config_path,omitempty"`
 	ServerCount int                       `json:"server_count"`
@@ -850,6 +863,67 @@ func (s *Server) handlePluginRoutes(w http.ResponseWriter, r *http.Request, sess
 		writeJSON(w, http.StatusOK, map[string]any{"plugins": summary})
 		return
 	}
+	if len(parts) == 1 && parts[0] == "validate" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req pluginValidateRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if strings.TrimSpace(req.Source) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("plugin source is required"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"validation": session.validatePlugin(req.Source)})
+		return
+	}
+	if len(parts) == 1 && parts[0] == "install" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req pluginInstallRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if strings.TrimSpace(req.Source) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("plugin source is required"))
+			return
+		}
+		summary, err := session.installPlugin(r.Context(), req.Source, req.Force)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plugins": summary})
+		return
+	}
+	if len(parts) == 1 && parts[0] == "remove" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var req pluginRemoveRequest
+		if err := decodeBody(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("plugin name is required"))
+			return
+		}
+		summary, err := session.removePlugin(r.Context(), req.Name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plugins": summary})
+		return
+	}
 	http.NotFound(w, r)
 }
 
@@ -1333,6 +1407,62 @@ func (m *managedSession) reloadPlugins(ctx context.Context) (sessionPluginSummar
 		return sessionPluginSummary{}, err
 	}
 
+	if err := m.save(); err != nil {
+		return sessionPluginSummary{}, err
+	}
+	return m.pluginSummary(), nil
+}
+
+func (m *managedSession) validatePlugin(source string) pluginruntime.ValidationReport {
+	if m == nil {
+		return pluginruntime.ValidationReport{}
+	}
+	if m.pluginManager != nil {
+		return m.pluginManager.Validate(source)
+	}
+	return pluginruntime.ValidateSource(m.config.WorkingDir, source)
+}
+
+func (m *managedSession) installPlugin(ctx context.Context, source string, force bool) (sessionPluginSummary, error) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	if m.pluginManager == nil {
+		manager, err := pluginruntime.Start(ctx, m.registry, pluginruntime.Options{
+			WorkingDir: m.config.WorkingDir,
+			PluginDir:  m.config.PluginDir,
+		})
+		if err != nil {
+			return sessionPluginSummary{}, err
+		}
+		m.pluginManager = manager
+	}
+	if err := m.pluginManager.Install(ctx, source, force); err != nil {
+		return sessionPluginSummary{}, err
+	}
+	if err := m.save(); err != nil {
+		return sessionPluginSummary{}, err
+	}
+	return m.pluginSummary(), nil
+}
+
+func (m *managedSession) removePlugin(ctx context.Context, name string) (sessionPluginSummary, error) {
+	m.runMu.Lock()
+	defer m.runMu.Unlock()
+
+	if m.pluginManager == nil {
+		manager, err := pluginruntime.Start(ctx, m.registry, pluginruntime.Options{
+			WorkingDir: m.config.WorkingDir,
+			PluginDir:  m.config.PluginDir,
+		})
+		if err != nil {
+			return sessionPluginSummary{}, err
+		}
+		m.pluginManager = manager
+	}
+	if err := m.pluginManager.Remove(ctx, name); err != nil {
+		return sessionPluginSummary{}, err
+	}
 	if err := m.save(); err != nil {
 		return sessionPluginSummary{}, err
 	}

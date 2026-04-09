@@ -138,6 +138,9 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":history [n]              print the latest n remote messages (default 10)")
 		fmt.Fprintln(a.out, ":audit [n]                print the latest n remote audit events for this session (default 20)")
 		fmt.Fprintln(a.out, ":plugins                  print remote plugin status")
+		fmt.Fprintln(a.out, ":plugins-validate <path>  validate a remote plugin source path")
+		fmt.Fprintln(a.out, ":plugins-install <path> [force] install a remote plugin from a local path on the daemon host")
+		fmt.Fprintln(a.out, ":plugins-remove <name>    remove an installed remote plugin")
 		fmt.Fprintln(a.out, ":plugins-reload           reload remote plugins")
 		fmt.Fprintln(a.out, ":mcp                      print remote MCP status")
 		fmt.Fprintln(a.out, ":mcp-health [server]      ping remote MCP servers and print live health")
@@ -193,6 +196,31 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 	case ":plugins":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
 			return a.client.GetPlugins(ctx, a.sessionID)
+		})
+	case ":plugins-validate":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :plugins-validate <path>")
+			return false, nil
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.ValidatePlugin(ctx, a.sessionID, fields[1])
+		})
+	case ":plugins-install":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :plugins-install <path> [force]")
+			return false, nil
+		}
+		force := len(fields) > 2 && (strings.EqualFold(fields[2], "force") || strings.EqualFold(fields[2], "--force"))
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.InstallPlugin(ctx, a.sessionID, fields[1], force)
+		})
+	case ":plugins-remove":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :plugins-remove <name>")
+			return false, nil
+		}
+		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {
+			return a.client.RemovePlugin(ctx, a.sessionID, fields[1])
 		})
 	case ":plugins-reload":
 		return false, a.printJSON(ctx, func(ctx context.Context) (any, error) {

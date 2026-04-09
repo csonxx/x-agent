@@ -52,7 +52,7 @@ x-agent/
 - P2 生态扩展第三阶段收口
   - hooks 从 shell command 扩成可组合事件总线，并支持 JSONL event sink
 - P2 生态扩展第四阶段收口
-  - 插件目录、manifest、命令型插件工具桥接、本地/远程 reload 与查看入口
+  - 插件目录、manifest、命令型插件工具桥接，以及本地/远程 validate、install、remove、reload、查看入口
 
 更完整的能力说明见：
 

@@ -54,6 +54,22 @@ type Status struct {
 	Error        string   `json:"error,omitempty"`
 }
 
+type ValidationReport struct {
+	SourcePath   string            `json:"source_path,omitempty"`
+	ManifestPath string            `json:"manifest_path,omitempty"`
+	PluginName   string            `json:"plugin_name,omitempty"`
+	Valid        bool              `json:"valid"`
+	ToolCount    int               `json:"tool_count"`
+	IssueCount   int               `json:"issue_count"`
+	Issues       []ValidationIssue `json:"issues,omitempty"`
+}
+
+type ValidationIssue struct {
+	Tool    string `json:"tool,omitempty"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+}
+
 type Manager struct {
 	mu           sync.RWMutex
 	registry     *engine.Registry
@@ -84,44 +100,79 @@ func Start(ctx context.Context, registry *engine.Registry, options Options) (*Ma
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
-		return nil, nil
-	}
-
 	manager := &Manager{
 		registry:  registry,
 		options:   options,
 		pluginDir: pluginDir,
 	}
 	manager.registerSupportTools()
-	if err := manager.load(ctx, pluginDir); err != nil {
-		_ = manager.Close()
-		return nil, err
+	if ok {
+		if err := manager.load(ctx, pluginDir); err != nil {
+			_ = manager.Close()
+			return nil, err
+		}
 	}
 	return manager, nil
 }
 
-func ResolvePluginDir(workingDir, explicit string) (string, bool, error) {
-	if strings.TrimSpace(explicit) != "" {
-		path, err := expandPath(workingDir, explicit)
-		if err != nil {
-			return "", false, err
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return "", false, fmt.Errorf("stat plugin dir %q: %w", path, err)
-		}
-		if !info.IsDir() {
-			return "", false, fmt.Errorf("plugin dir is not a directory: %s", path)
-		}
-		return path, true, nil
+func (m *Manager) Validate(source string) ValidationReport {
+	if m == nil {
+		return ValidationReport{}
 	}
+	m.mu.RLock()
+	workingDir := m.options.WorkingDir
+	m.mu.RUnlock()
+	return ValidateSource(workingDir, source)
+}
 
-	path := filepath.Join(workingDir, ".xxx-code", "plugins")
+func (m *Manager) Install(ctx context.Context, source string, force bool) error {
+	if m == nil {
+		return errors.New("plugins are not configured")
+	}
+	m.mu.RLock()
+	workingDir := m.options.WorkingDir
+	explicit := m.options.PluginDir
+	m.mu.RUnlock()
+
+	pluginDir, err := EnsurePluginDir(workingDir, explicit)
+	if err != nil {
+		return err
+	}
+	if _, err := InstallSource(workingDir, pluginDir, source, force); err != nil {
+		return err
+	}
+	return m.Reload(ctx)
+}
+
+func (m *Manager) Remove(ctx context.Context, name string) error {
+	if m == nil {
+		return errors.New("plugins are not configured")
+	}
+	m.mu.RLock()
+	workingDir := m.options.WorkingDir
+	explicit := m.options.PluginDir
+	statuses := append([]Status(nil), m.statuses...)
+	m.mu.RUnlock()
+
+	pluginDir, err := EnsurePluginDir(workingDir, explicit)
+	if err != nil {
+		return err
+	}
+	if err := RemoveInstalled(pluginDir, name, statuses); err != nil {
+		return err
+	}
+	return m.Reload(ctx)
+}
+
+func ResolvePluginDir(workingDir, explicit string) (string, bool, error) {
+	path, err := desiredPluginDir(workingDir, explicit)
+	if err != nil {
+		return "", false, err
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", false, nil
+			return path, false, nil
 		}
 		return "", false, fmt.Errorf("stat plugin dir %q: %w", path, err)
 	}
@@ -129,6 +180,24 @@ func ResolvePluginDir(workingDir, explicit string) (string, bool, error) {
 		return "", false, fmt.Errorf("plugin dir is not a directory: %s", path)
 	}
 	return path, true, nil
+}
+
+func EnsurePluginDir(workingDir, explicit string) (string, error) {
+	path, err := desiredPluginDir(workingDir, explicit)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", fmt.Errorf("create plugin dir %q: %w", path, err)
+	}
+	return path, nil
+}
+
+func desiredPluginDir(workingDir, explicit string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return expandPath(workingDir, explicit)
+	}
+	return filepath.Join(workingDir, ".xxx-code", "plugins"), nil
 }
 
 func expandPath(base, value string) (string, error) {
@@ -183,7 +252,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 	m.dynamicTools = nil
 	m.statuses = nil
 	if !ok {
-		m.pluginDir = ""
+		m.pluginDir = pluginDir
 		return nil
 	}
 	m.pluginDir = pluginDir
@@ -329,6 +398,221 @@ func discoverManifestPaths(pluginDir string) ([]string, error) {
 	return paths, nil
 }
 
+func ValidateSource(workingDir, source string) ValidationReport {
+	report := ValidationReport{}
+	manifestPath, sourceRoot, err := resolveSource(workingDir, source)
+	if err != nil {
+		report.SourcePath = strings.TrimSpace(source)
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: err.Error(),
+		})
+		report.IssueCount = len(report.Issues)
+		return report
+	}
+	report.SourcePath = sourceRoot
+	report.ManifestPath = manifestPath
+
+	manifest, err := loadManifest(manifestPath)
+	if err != nil {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: err.Error(),
+		})
+		report.IssueCount = len(report.Issues)
+		return report
+	}
+	report.PluginName = manifest.Name
+	report.ToolCount = len(manifest.Tools)
+
+	if strings.TrimSpace(manifest.Name) == "" {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: "plugin name cannot be empty",
+		})
+	}
+	if len(manifest.Tools) == 0 {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: "plugin must define at least one tool",
+		})
+	}
+	seen := map[string]struct{}{}
+	for _, tool := range manifest.Tools {
+		validateToolSpec(&report, filepath.Dir(manifestPath), tool, seen)
+	}
+	report.IssueCount = len(report.Issues)
+	report.Valid = true
+	for _, issue := range report.Issues {
+		if issue.Level == "error" {
+			report.Valid = false
+			return report
+		}
+	}
+	return report
+}
+
+func validateToolSpec(report *ValidationReport, manifestDir string, tool CommandToolSpec, seen map[string]struct{}) {
+	name := strings.TrimSpace(tool.Name)
+	if name == "" {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Level:   "error",
+			Message: "plugin tool name cannot be empty",
+		})
+		return
+	}
+	if _, ok := seen[name]; ok {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Tool:    name,
+			Level:   "error",
+			Message: "duplicate plugin tool name",
+		})
+	} else {
+		seen[name] = struct{}{}
+	}
+	if strings.TrimSpace(tool.Command) == "" {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Tool:    name,
+			Level:   "error",
+			Message: "plugin tool command cannot be empty",
+		})
+	}
+	if strings.TrimSpace(tool.Description) == "" {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Tool:    name,
+			Level:   "warning",
+			Message: "plugin tool description is empty",
+		})
+	}
+	if strings.TrimSpace(tool.Timeout) != "" {
+		if _, err := time.ParseDuration(strings.TrimSpace(tool.Timeout)); err != nil {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Tool:    name,
+				Level:   "error",
+				Message: "invalid tool timeout: " + err.Error(),
+			})
+		}
+	}
+	command := strings.TrimSpace(tool.Command)
+	if strings.Contains(command, string(filepath.Separator)) {
+		resolved := filepath.Clean(filepath.Join(manifestDir, command))
+		info, err := os.Stat(resolved)
+		if err != nil {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Tool:    name,
+				Level:   "error",
+				Message: "plugin command path not found: " + resolved,
+			})
+		} else if info.IsDir() {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Tool:    name,
+				Level:   "error",
+				Message: "plugin command path is a directory: " + resolved,
+			})
+		}
+	}
+	if strings.TrimSpace(tool.Cwd) != "" {
+		resolved := filepath.Clean(filepath.Join(manifestDir, strings.TrimSpace(tool.Cwd)))
+		info, err := os.Stat(resolved)
+		if err != nil {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Tool:    name,
+				Level:   "error",
+				Message: "plugin cwd not found: " + resolved,
+			})
+		} else if !info.IsDir() {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Tool:    name,
+				Level:   "error",
+				Message: "plugin cwd is not a directory: " + resolved,
+			})
+		}
+	}
+}
+
+func InstallSource(workingDir, pluginDir, source string, force bool) (string, error) {
+	manifestPath, sourceRoot, err := resolveSource(workingDir, source)
+	if err != nil {
+		return "", err
+	}
+	report := ValidateSource(workingDir, source)
+	if !report.Valid {
+		return "", fmt.Errorf("plugin validation failed: %s", validationIssueSummary(report))
+	}
+	manifest, err := loadManifest(manifestPath)
+	if err != nil {
+		return "", err
+	}
+
+	destDir := filepath.Join(pluginDir, normalizeName(manifest.Name))
+	if _, err := os.Stat(destDir); err == nil {
+		if !force {
+			return "", fmt.Errorf("plugin already exists: %s", manifest.Name)
+		}
+		if err := os.RemoveAll(destDir); err != nil {
+			return "", fmt.Errorf("remove existing plugin %s: %w", manifest.Name, err)
+		}
+	}
+	if err := copyDir(sourceRoot, destDir); err != nil {
+		return "", err
+	}
+	return manifest.Name, nil
+}
+
+func validationIssueSummary(report ValidationReport) string {
+	if len(report.Issues) == 0 {
+		return "unknown validation error"
+	}
+	parts := make([]string, 0, len(report.Issues))
+	for _, issue := range report.Issues {
+		message := strings.TrimSpace(issue.Message)
+		if message == "" {
+			continue
+		}
+		if tool := strings.TrimSpace(issue.Tool); tool != "" {
+			message = tool + ": " + message
+		}
+		if level := strings.TrimSpace(issue.Level); level != "" {
+			message = "[" + level + "] " + message
+		}
+		parts = append(parts, message)
+		if len(parts) == 3 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return "unknown validation error"
+	}
+	if len(report.Issues) > len(parts) {
+		return strings.Join(parts, "; ") + fmt.Sprintf(" (+%d more)", len(report.Issues)-len(parts))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func RemoveInstalled(pluginDir, name string, statuses []Status) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("plugin name is required")
+	}
+	for _, status := range statuses {
+		if status.Name == name && strings.TrimSpace(status.ManifestPath) != "" {
+			target := filepath.Dir(status.ManifestPath)
+			if err := os.RemoveAll(target); err != nil {
+				return fmt.Errorf("remove plugin %s: %w", name, err)
+			}
+			return nil
+		}
+	}
+	target := filepath.Join(pluginDir, normalizeName(name))
+	if _, err := os.Stat(target); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("plugin not found: %s", name)
+		}
+		return err
+	}
+	return os.RemoveAll(target)
+}
+
 func loadManifest(path string) (Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -339,6 +623,43 @@ func loadManifest(path string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("parse plugin manifest: %w", err)
 	}
 	return manifest, nil
+}
+
+func resolveSource(workingDir, source string) (manifestPath string, sourceRoot string, err error) {
+	path, err := expandPath(workingDir, source)
+	if err != nil {
+		return "", "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", "", fmt.Errorf("stat plugin source %q: %w", path, err)
+	}
+	if info.IsDir() {
+		manifestPath, err = manifestInDir(path)
+		if err != nil {
+			return "", "", err
+		}
+		return manifestPath, path, nil
+	}
+	return path, filepath.Dir(path), nil
+}
+
+func manifestInDir(dir string) (string, error) {
+	primary := filepath.Join(dir, "plugin.json")
+	if info, err := os.Stat(primary); err == nil && !info.IsDir() {
+		return primary, nil
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "*.plugin.json"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("multiple plugin manifests found in %s", dir)
+	}
+	return "", fmt.Errorf("no plugin manifest found in %s", dir)
 }
 
 func inferPluginName(path string) string {
@@ -450,6 +771,9 @@ func (m *Manager) registerSupportTools() {
 	}
 	_ = m.registry.AddTool(&listTool{manager: m})
 	_ = m.registry.AddTool(&reloadTool{manager: m})
+	_ = m.registry.AddTool(&validateTool{manager: m})
+	_ = m.registry.AddTool(&installTool{manager: m})
+	_ = m.registry.AddTool(&removeTool{manager: m})
 }
 
 func normalizeName(value string) string {
@@ -481,6 +805,27 @@ func copyStringMap(input map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
 }
 
 func mergeEnv(base []string, overrides map[string]string) []string {

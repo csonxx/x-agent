@@ -217,6 +217,9 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, ":workflow-tasks <id> [status|name=<task>] list persisted workflow tasks")
 		fmt.Fprintln(a.out, ":workflow-resume <id> [failed|task...]    resume a workflow from failed or selected tasks")
 		fmt.Fprintln(a.out, ":plugins                  list loaded plugins and bridged tools")
+		fmt.Fprintln(a.out, ":plugins-validate <path>  validate a plugin directory or manifest file")
+		fmt.Fprintln(a.out, ":plugins-install <path> [force] install a plugin into the configured plugin dir")
+		fmt.Fprintln(a.out, ":plugins-remove <name>    remove an installed plugin")
 		fmt.Fprintln(a.out, ":plugins-reload           reload plugin manifests and bridged tools")
 		fmt.Fprintln(a.out, ":mcp                      list MCP server status and loaded tools")
 		fmt.Fprintln(a.out, ":mcp-health [server]      ping MCP servers and print live health")
@@ -315,6 +318,57 @@ func (a *App) handleCommand(ctx context.Context, line string) (bool, error) {
 		fmt.Fprintln(a.out, string(data))
 		return false, a.saveSession()
 	case ":plugins":
+		data, _ := json.MarshalIndent(a.currentPluginSummary(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":plugins-validate":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :plugins-validate <path>")
+			return false, nil
+		}
+		if a.pluginManager == nil {
+			if err := a.initPlugins(ctx); err != nil {
+				fmt.Fprintf(a.errOut, "error: %v\n", err)
+				return false, nil
+			}
+		}
+		data, _ := json.MarshalIndent(a.pluginManager.Validate(fields[1]), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":plugins-install":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :plugins-install <path> [force]")
+			return false, nil
+		}
+		if a.pluginManager == nil {
+			if err := a.initPlugins(ctx); err != nil {
+				fmt.Fprintf(a.errOut, "error: %v\n", err)
+				return false, nil
+			}
+		}
+		force := len(fields) > 2 && (strings.EqualFold(fields[2], "force") || strings.EqualFold(fields[2], "--force"))
+		if err := a.pluginManager.Install(ctx, fields[1], force); err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
+		data, _ := json.MarshalIndent(a.currentPluginSummary(), "", "  ")
+		fmt.Fprintln(a.out, string(data))
+		return false, nil
+	case ":plugins-remove":
+		if len(fields) < 2 {
+			fmt.Fprintln(a.errOut, "usage: :plugins-remove <name>")
+			return false, nil
+		}
+		if a.pluginManager == nil {
+			if err := a.initPlugins(ctx); err != nil {
+				fmt.Fprintf(a.errOut, "error: %v\n", err)
+				return false, nil
+			}
+		}
+		if err := a.pluginManager.Remove(ctx, fields[1]); err != nil {
+			fmt.Fprintf(a.errOut, "error: %v\n", err)
+			return false, nil
+		}
 		data, _ := json.MarshalIndent(a.currentPluginSummary(), "", "  ")
 		fmt.Fprintln(a.out, string(data))
 		return false, nil

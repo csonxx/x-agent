@@ -17,6 +17,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
+	pluginruntime "github.com/caowenhua/x-agent/xxx-code/internal/plugins"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
@@ -406,6 +407,48 @@ func (c *Client) ReloadPlugins(ctx context.Context, sessionID string) (PluginSum
 		Plugins PluginSummary `json:"plugins"`
 	}
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/plugins/reload", map[string]any{}, &response); err != nil {
+		return PluginSummary{}, err
+	}
+	return response.Plugins, nil
+}
+
+func (c *Client) ValidatePlugin(ctx context.Context, sessionID, source string) (pluginruntime.ValidationReport, error) {
+	var response struct {
+		Validation pluginruntime.ValidationReport `json:"validation"`
+	}
+	payload := map[string]any{
+		"source": strings.TrimSpace(source),
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/plugins/validate", payload, &response); err != nil {
+		return pluginruntime.ValidationReport{}, err
+	}
+	return response.Validation, nil
+}
+
+func (c *Client) InstallPlugin(ctx context.Context, sessionID, source string, force bool) (PluginSummary, error) {
+	var response struct {
+		Plugins PluginSummary `json:"plugins"`
+	}
+	payload := map[string]any{
+		"source": strings.TrimSpace(source),
+	}
+	if force {
+		payload["force"] = true
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/plugins/install", payload, &response); err != nil {
+		return PluginSummary{}, err
+	}
+	return response.Plugins, nil
+}
+
+func (c *Client) RemovePlugin(ctx context.Context, sessionID, name string) (PluginSummary, error) {
+	var response struct {
+		Plugins PluginSummary `json:"plugins"`
+	}
+	payload := map[string]any{
+		"name": strings.TrimSpace(name),
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(strings.TrimSpace(sessionID))+"/plugins/remove", payload, &response); err != nil {
 		return PluginSummary{}, err
 	}
 	return response.Plugins, nil

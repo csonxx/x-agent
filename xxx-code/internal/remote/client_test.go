@@ -333,6 +333,56 @@ func TestClientCanInspectAndReloadPlugins(t *testing.T) {
 	}
 }
 
+func TestClientCanValidateInstallAndRemovePlugins(t *testing.T) {
+	cfg := newTestConfig(t)
+	sourceDir := writeRemotePluginSource(t, filepath.Join(cfg.WorkingDir, "plugin-sources"), "echoer", "#!/bin/sh\ncat\n")
+
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteTestProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "remote-plugin-lifecycle")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validation, err := client.ValidatePlugin(context.Background(), session.ID, sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validation.Valid || validation.PluginName != "echoer" || validation.ToolCount != 1 {
+		t.Fatalf("expected valid plugin report, got %+v", validation)
+	}
+
+	installed, err := client.InstallPlugin(context.Background(), session.ID, sourceDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.PluginCount != 1 || len(installed.Statuses) != 1 || installed.Statuses[0].Name != "echoer" {
+		t.Fatalf("expected installed plugin summary, got %+v", installed)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.WorkingDir, ".xxx-code", "plugins", "echoer", "plugin.json")); err != nil {
+		t.Fatalf("expected installed plugin to exist in plugin dir: %v", err)
+	}
+
+	removed, err := client.RemovePlugin(context.Background(), session.ID, "echoer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.PluginCount != 0 || removed.ToolCount != 0 {
+		t.Fatalf("expected empty plugin summary after removal, got %+v", removed)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.WorkingDir, ".xxx-code", "plugins", "echoer")); !os.IsNotExist(err) {
+		t.Fatalf("expected installed plugin directory to be removed, got err=%v", err)
+	}
+}
+
 func TestClientCanListSessionAudit(t *testing.T) {
 	client, cleanup := newTestClient(t)
 	defer cleanup()
@@ -677,7 +727,12 @@ func newTestConfig(t *testing.T) config.Config {
 
 func writeRemotePlugin(t *testing.T, workingDir, pluginName, script string) {
 	t.Helper()
-	pluginDir := filepath.Join(workingDir, ".xxx-code", "plugins", pluginName)
+	writeRemotePluginSource(t, filepath.Join(workingDir, ".xxx-code", "plugins"), pluginName, script)
+}
+
+func writeRemotePluginSource(t *testing.T, rootDir, pluginName, script string) string {
+	t.Helper()
+	pluginDir := filepath.Join(rootDir, pluginName)
 	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -692,10 +747,11 @@ func writeRemotePlugin(t *testing.T, workingDir, pluginName, script string) {
     "input_schema": {"type": "object"},
     "command": "./tool.sh"
   }]
-}`
+	}`
 	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	return pluginDir
 }
 
 func latestRemoteUserText(messages []engine.Message) string {

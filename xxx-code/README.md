@@ -75,6 +75,9 @@ xxx-code/
 - `mcp_validate`
 - `plugin__<plugin>__<tool>` 动态插件 tools
 - `list_plugins`
+- `validate_plugin`
+- `install_plugin`
+- `remove_plugin`
 - `reload_plugins`
 
 ## 运行前准备
@@ -243,6 +246,9 @@ REPL 内支持：
 - `:workflow-tasks <workflow-id> [status|name=<task>]`
 - `:workflow-resume <workflow-id> [failed|task...]`
 - `:plugins`
+- `:plugins-validate <path>`
+- `:plugins-install <path> [force]`
+- `:plugins-remove <name>`
 - `:plugins-reload`
 - `:mcp`
 - `:mcp-health [server]`
@@ -370,6 +376,9 @@ go run ./cmd/xxx-code \
 - `GET /v1/sessions/{id}/policy`
 - `GET /v1/sessions/{id}/hooks`
 - `GET /v1/sessions/{id}/plugins`
+- `POST /v1/sessions/{id}/plugins/validate`
+- `POST /v1/sessions/{id}/plugins/install`
+- `POST /v1/sessions/{id}/plugins/remove`
 - `POST /v1/sessions/{id}/plugins/reload`
 - `GET /v1/sessions/{id}/mcp`
 - `GET /v1/sessions/{id}/mcp/health?server=name`
@@ -540,6 +549,9 @@ release workflow 会在推送 `v*` tag 时生成多平台二进制、archive 和
 - `:history [n]`
 - `:audit [n]`
 - `:plugins`
+- `:plugins-validate <path>`
+- `:plugins-install <path> [force]`
+- `:plugins-remove <name>`
 - `:plugins-reload`
 - `:mcp`
 - `:mcp-health [server]`
@@ -803,16 +815,27 @@ runtime 会按结构化 tool result 处理。
 本地 REPL 和 remote REPL 都支持：
 
 - `:plugins`
+- `:plugins-validate <path>`
+- `:plugins-install <path> [force]`
+- `:plugins-remove <name>`
 - `:plugins-reload`
+
+其中 `:plugins-validate` / `:plugins-install` 的 `path` 是 daemon 或本地进程所在机器上的路径，可以传插件目录，也可以直接传 manifest 文件。
 
 daemon API 对应是：
 
 - `GET /v1/sessions/{id}/plugins`
+- `POST /v1/sessions/{id}/plugins/validate`
+- `POST /v1/sessions/{id}/plugins/install`
+- `POST /v1/sessions/{id}/plugins/remove`
 - `POST /v1/sessions/{id}/plugins/reload`
 
 同时模型侧还能直接用：
 
 - `list_plugins`
+- `validate_plugin`
+- `install_plugin`
+- `remove_plugin`
 - `reload_plugins`
 
 当前插件工具是“受信任扩展”模型。它们仍然会被 `--allow-tools / --deny-tools` 约束，但插件命令本身是宿主机进程，所以更适合放在你自己控制的目录和代码里。

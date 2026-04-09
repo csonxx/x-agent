@@ -81,7 +81,7 @@
 - [x] hooks 向事件总线演进
   - 已补 hooks bus，可同时分发到 shell hook 和 JSONL event sink
 - [x] tool / runtime 插件化
-  - 已补插件目录、manifest、命令型工具桥接、reload、本地/远程查看入口
+  - 已补插件目录、manifest、命令型工具桥接、validate/install/remove/reload、本地/远程查看与管理入口
 
 ## 执行顺序
 
