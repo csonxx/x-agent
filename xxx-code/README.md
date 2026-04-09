@@ -131,9 +131,22 @@ go run ./cmd/xxx-code version
 go run ./cmd/xxx-code --config /path/to/config.json
 ```
 
-仓库里放了一份可直接改的模板：
+仓库里放了可直接改的模板：
 
 - [examples/config.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/config.json)
+- [examples/anthropic.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/anthropic.json)
+- [examples/openai.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/openai.json)
+- [examples/gpt.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gpt.json)
+- [examples/azure-openai.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/azure-openai.json)
+- [examples/gemini.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gemini.json)
+- [examples/minimax.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/minimax.json)
+- [examples/glm.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/glm.json)
+
+其中：
+
+- `config.json` 和 `anthropic.json` 适合默认 Anthropic 场景
+- `azure-openai.json` 需要先把 `base_url` 和 `model` 改成你自己的部署信息
+- 其他 provider 模板可以直接按 `provider + model` 为起点改
 
 比较常用的环境变量有：
 
@@ -269,6 +282,14 @@ go run ./cmd/xxx-code --provider glm --model glm-4.5
 - `glm`: `https://open.bigmodel.cn/api/coding/paas/v4`
 
 目前这些 provider 都已经接进同一套 tool-calling 主循环；OpenAI-compatible 家族也支持流式文本输出与工具调用增量拼装。
+
+如果你想直接从模板起步，也可以：
+
+```bash
+go run ./cmd/xxx-code --config examples/gemini.json
+go run ./cmd/xxx-code --config examples/minimax.json
+go run ./cmd/xxx-code --config examples/glm.json
+```
 
 ## 交互模式
 
