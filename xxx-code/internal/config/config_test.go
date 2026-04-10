@@ -14,15 +14,16 @@ func TestLoadArgsAppliesConfigEnvAndFlagsInOrder(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(configDir, "config.json")
-	configBody := `{
-  "model": "file-model",
-  "max_turns": 5,
-  "allow_read": ["docs"],
-  "log_level": "error",
-  "log_file": ".xxx-code/diag.log",
-  "system_prompt": "from config"
-}`
+	configPath := filepath.Join(configDir, "config.yaml")
+	configBody := `# file-level defaults
+model: file-model
+max_turns: 5
+allow_read:
+  - docs
+log_level: error
+log_file: .xxx-code/diag.log
+system_prompt: from config
+`
 	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +64,67 @@ func TestLoadArgsAppliesConfigEnvAndFlagsInOrder(t *testing.T) {
 		t.Fatalf("expected config file system prompt, got %q", cfg.SystemPrompt)
 	}
 	if len(cfg.ReadRoots) != 2 || cfg.ReadRoots[0] != dir || cfg.ReadRoots[1] != filepath.Join(dir, "docs") {
+		t.Fatalf("unexpected read roots: %+v", cfg.ReadRoots)
+	}
+}
+
+func TestLoadArgsPrefersYAMLConfigOverJSON(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".xxx-code")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(configDir, "config.yaml")
+	jsonPath := filepath.Join(configDir, "config.json")
+	if err := os.WriteFile(yamlPath, []byte("model: yaml-model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonPath, []byte(`{"model":"json-model"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadArgs([]string{}, lookupFromMap(map[string]string{
+		"ANTHROPIC_API_KEY": "test-key",
+	}), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConfigFile != yamlPath {
+		t.Fatalf("expected yaml config to win, got %q", cfg.ConfigFile)
+	}
+	if cfg.Model != "yaml-model" {
+		t.Fatalf("expected yaml model to win, got %q", cfg.Model)
+	}
+}
+
+func TestLoadArgsLoadsExplicitYAMLConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom.yml")
+	configBody := `provider: gemini
+model: gemini-2.5-pro
+allow_read:
+  - docs
+`
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadArgs([]string{"--config", configPath}, lookupFromMap(map[string]string{
+		"GEMINI_API_KEY": "gemini-key",
+	}), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConfigFile != configPath {
+		t.Fatalf("unexpected config path: %q", cfg.ConfigFile)
+	}
+	if cfg.Provider != "gemini" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.Model != "gemini-2.5-pro" {
+		t.Fatalf("unexpected model: %q", cfg.Model)
+	}
+	if len(cfg.ReadRoots) != 2 || cfg.ReadRoots[1] != filepath.Join(dir, "docs") {
 		t.Fatalf("unexpected read roots: %+v", cfg.ReadRoots)
 	}
 }
@@ -311,6 +373,35 @@ func TestLoadArgsParsesPluginDir(t *testing.T) {
 	}
 	if cfg.PluginDir != filepath.Join(dir, "runtime", "plugins") {
 		t.Fatalf("unexpected plugin dir: %q", cfg.PluginDir)
+	}
+}
+
+func TestExampleYAMLConfigsAreLoadable(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	matches, err := filepath.Glob(filepath.Join(root, "examples", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected example yaml configs to exist")
+	}
+
+	for _, configPath := range matches {
+		t.Run(filepath.Base(configPath), func(t *testing.T) {
+			cfg, err := LoadArgs([]string{"--config", configPath}, lookupFromMap(map[string]string{
+				"XXX_CODE_API_KEY": "test-key",
+			}), root)
+			if err != nil {
+				t.Fatalf("load %s: %v", configPath, err)
+			}
+			if cfg.ConfigFile != configPath {
+				t.Fatalf("expected config path %q, got %q", configPath, cfg.ConfigFile)
+			}
+		})
 	}
 }
 

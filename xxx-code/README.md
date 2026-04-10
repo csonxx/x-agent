@@ -122,31 +122,38 @@ go run ./cmd/xxx-code version
 默认会自动发现：
 
 ```text
-.xxx-code/config.json
+.xxx-code/config.yaml
 ```
 
 也可以显式指定：
 
 ```bash
-go run ./cmd/xxx-code --config /path/to/config.json
+go run ./cmd/xxx-code --config /path/to/config.yaml
 ```
 
-仓库里放了可直接改的模板：
+运行时现在默认按 YAML 优先发现配置，同时仍兼容旧的 `.json` 配置文件，方便平滑迁移。
 
-- [examples/config.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/config.json)
-- [examples/anthropic.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/anthropic.json)
-- [examples/openai.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/openai.json)
-- [examples/gpt.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gpt.json)
-- [examples/azure-openai.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/azure-openai.json)
-- [examples/gemini.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gemini.json)
-- [examples/minimax.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/minimax.json)
-- [examples/glm.json](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/glm.json)
+仓库里放了可直接改的带注释 YAML 模板：
+
+- [examples/config.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/config.yaml)
+- [examples/anthropic.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/anthropic.yaml)
+- [examples/openai.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/openai.yaml)
+- [examples/gpt.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gpt.yaml)
+- [examples/azure-openai.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/azure-openai.yaml)
+- [examples/gemini.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/gemini.yaml)
+- [examples/minimax.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/minimax.yaml)
+- [examples/glm.yaml](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/glm.yaml)
+
+环境变量模板也一起放好了：
+
+- [examples/.env.example](/Users/tt/goworkspace/src/x-agent/xxx-code/examples/.env.example)
 
 其中：
 
-- `config.json` 和 `anthropic.json` 适合默认 Anthropic 场景
-- `azure-openai.json` 需要先把 `base_url` 和 `model` 改成你自己的部署信息
+- `config.yaml` 和 `anthropic.yaml` 适合默认 Anthropic 场景
+- `azure-openai.yaml` 需要先把 `base_url` 和 `model` 改成你自己的部署信息
 - 其他 provider 模板可以直接按 `provider + model` 为起点改
+- `.env.example` 里对每个环境变量都加了注释，适合做本地 `.env` 起点
 
 比较常用的环境变量有：
 
@@ -186,7 +193,7 @@ go run ./cmd/xxx-code --config /path/to/config.json
 - `--log-level info|debug|error`
 - `--debug`
 - `--log-file .xxx-code/xxx-code.log`
-- `--config .xxx-code/config.json`
+- `--config .xxx-code/config.yaml`
 
 ## Provider
 
@@ -286,9 +293,9 @@ go run ./cmd/xxx-code --provider glm --model glm-4.5
 如果你想直接从模板起步，也可以：
 
 ```bash
-go run ./cmd/xxx-code --config examples/gemini.json
-go run ./cmd/xxx-code --config examples/minimax.json
-go run ./cmd/xxx-code --config examples/glm.json
+go run ./cmd/xxx-code --config examples/gemini.yaml
+go run ./cmd/xxx-code --config examples/minimax.yaml
+go run ./cmd/xxx-code --config examples/glm.yaml
 ```
 
 ## 交互模式

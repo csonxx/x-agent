@@ -1,0 +1,56 @@
+# Provider name. Supported values: anthropic, openai, gpt, azure-openai, gemini, minimax, glm.
+provider: gemini
+# Gemini model name exposed via Google's OpenAI-compatible endpoint.
+model: gemini-2.5-pro
+# Working directory exposed to tools and used for relative paths.
+cwd: .
+# Session transcript persistence path.
+session_file: .xxx-code/session.json
+# Daemon state directory for remote session management.
+daemon_dir: .xxx-code/daemon
+# Bearer token file for protecting daemon APIs.
+daemon_token_file: .secrets/daemon-token.txt
+# JSONL audit log path for daemon request and policy events.
+daemon_audit_file: .xxx-code/daemon/audit.jsonl
+# Per-client daemon request limit per minute.
+daemon_rate_limit_per_minute: 120
+# Burst allowance for the daemon rate limiter.
+daemon_rate_limit_burst: 20
+# Daemon API modes that are allowed when ACLs are enabled.
+daemon_allow_modes:
+  - sessions_read
+  - sessions_write
+  - turns
+  - introspection
+  - plugins
+  - mcp
+  - agents
+  - workflows
+  - audit
+  - save
+# Remote bridge bearer token file.
+remote_token_file: .secrets/daemon-token.txt
+# MCP configuration file path.
+mcp_config: .mcp.json
+# Runtime plugin directory.
+plugin_dir: .xxx-code/plugins
+# JSONL hook event sink path.
+hook_event_file: .xxx-code/hooks/events.jsonl
+# Read roots available to file tools.
+allow_read:
+  - .
+# Write roots available to file tools.
+allow_write:
+  - .
+# Stream model text output when the provider supports it.
+stream: true
+# Print verbose lifecycle events for tools, MCP and agents.
+verbose: false
+# Diagnostic log level: error, info or debug.
+log_level: info
+# Additional diagnostic log file.
+log_file: .xxx-code/xxx-code.log
+# Per-tool timeout.
+tool_timeout: 2m
+# Per-hook timeout.
+hook_timeout: 30s

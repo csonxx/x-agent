@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
+	"gopkg.in/yaml.v3"
 )
 
 const defaultSystemPrompt = `You are xxx-code, a Go-built coding agent inspired by Claude Code.
@@ -257,7 +258,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	fs.BoolVar(&debugDefault, "debug", debugDefault, "Shortcut for --log-level=debug")
 	fs.BoolVar(&cfg.ShowVersion, "version", false, "Print build version information and exit")
 
-	configFileFlag := fs.String("config", cfg.ConfigFile, "Path to a JSON config file; defaults to .xxx-code/config.json when present")
+	configFileFlag := fs.String("config", cfg.ConfigFile, "Path to a YAML or JSON config file; defaults to .xxx-code/config.yaml when present")
 	systemPromptFileFlag := fs.String("system-prompt-file", raw.systemPromptFile, "Read the system prompt from a file")
 	cwdFlag := fs.String("cwd", raw.workingDir, "Working directory")
 	sessionFileFlag := fs.String("session-file", raw.sessionFile, "Path to the persisted session file")
@@ -752,14 +753,17 @@ func resolveConfigPath(args []string, lookup func(string) (string, bool), workin
 		}
 		return path, nil
 	}
-	path := filepath.Join(workingDir, ".xxx-code", "config.json")
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+	for _, name := range []string{"config.yaml", "config.yml", "config.json"} {
+		path := filepath.Join(workingDir, ".xxx-code", name)
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return "", err
 		}
-		return "", err
+		return path, nil
 	}
-	return path, nil
+	return "", nil
 }
 
 func loadFileConfig(path string) (fileConfig, error) {
@@ -767,11 +771,67 @@ func loadFileConfig(path string) (fileConfig, error) {
 	if err != nil {
 		return fileConfig{}, err
 	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		return decodeYAMLFileConfig(path, data)
+	case ".json":
+		return decodeJSONFileConfig(path, data)
+	default:
+		if cfg, err := decodeYAMLFileConfig(path, data); err == nil {
+			return cfg, nil
+		}
+		return decodeJSONFileConfig(path, data)
+	}
+}
+
+func decodeJSONFileConfig(path string, data []byte) (fileConfig, error) {
 	var cfg fileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fileConfig{}, fmt.Errorf("parse config file %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+func decodeYAMLFileConfig(path string, data []byte) (fileConfig, error) {
+	var raw any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return fileConfig{}, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	normalized := normalizeYAMLValue(raw)
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return fileConfig{}, fmt.Errorf("normalize config file %s: %w", path, err)
+	}
+	var cfg fileConfig
+	if err := json.Unmarshal(payload, &cfg); err != nil {
+		return fileConfig{}, fmt.Errorf("decode config file %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func normalizeYAMLValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		normalized := make(map[string]any, len(typed))
+		for key, item := range typed {
+			normalized[key] = normalizeYAMLValue(item)
+		}
+		return normalized
+	case map[any]any:
+		normalized := make(map[string]any, len(typed))
+		for key, item := range typed {
+			normalized[fmt.Sprint(key)] = normalizeYAMLValue(item)
+		}
+		return normalized
+	case []any:
+		normalized := make([]any, 0, len(typed))
+		for _, item := range typed {
+			normalized = append(normalized, normalizeYAMLValue(item))
+		}
+		return normalized
+	default:
+		return value
+	}
 }
 
 func visitedFlags(fs *flag.FlagSet) map[string]bool {
