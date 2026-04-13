@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,68 +16,84 @@ import (
 )
 
 func main() {
-	cfg, err := config.Load()
+	os.Exit(runMain(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func runMain(args []string, stdout, stderr io.Writer) int {
+	wd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
-	}
-	if cfg.ShowVersion {
-		fmt.Fprint(os.Stdout, buildinfo.String())
-		return
+		fmt.Fprintf(stderr, "config error: %v\n", err)
+		return 1
 	}
 
-	errOut, closeErrOut, err := openErrorOutput(cfg)
+	cfg, err := config.LoadArgs(args, os.LookupEnv, wd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "log setup error: %v\n", err)
-		os.Exit(1)
+		var helpErr *config.HelpError
+		if errors.As(err, &helpErr) {
+			fmt.Fprint(stdout, helpErr.Usage)
+			return 0
+		}
+		fmt.Fprintf(stderr, "config error: %v\n", err)
+		return 1
+	}
+	if cfg.ShowVersion {
+		fmt.Fprint(stdout, buildinfo.String())
+		return 0
+	}
+
+	errOut, closeErrOut, err := openErrorOutput(cfg, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "log setup error: %v\n", err)
+		return 1
 	}
 	defer func() {
 		if closeErr := closeErrOut(); closeErr != nil {
-			fmt.Fprintf(os.Stderr, "log close error: %v\n", closeErr)
+			fmt.Fprintf(stderr, "log close error: %v\n", closeErr)
 		}
 	}()
 
 	if cfg.Daemon && cfg.RemoteURL != "" {
 		fmt.Fprintln(errOut, "config error: --daemon cannot be combined with --remote-url")
-		os.Exit(1)
+		return 1
 	}
 
 	if cfg.Daemon {
 		if cfg.TUI {
 			fmt.Fprintln(errOut, "config error: --daemon cannot be combined with --tui")
-			os.Exit(1)
+			return 1
 		}
 		if cfg.Print {
 			fmt.Fprintln(errOut, "config error: --daemon cannot be combined with --print or a direct prompt")
-			os.Exit(1)
+			return 1
 		}
-		server := daemon.New(cfg, os.Stdout, errOut, nil)
+		server := daemon.New(cfg, stdout, errOut, nil)
 		if err := server.Run(context.Background()); err != nil {
 			fmt.Fprintf(errOut, "run error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	if cfg.RemoteURL != "" {
-		app := remote.New(cfg, os.Stdout, errOut)
+		app := remote.New(cfg, stdout, errOut)
 		if err := app.Run(context.Background()); err != nil {
 			fmt.Fprintf(errOut, "run error: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
-	app := cli.New(cfg, os.Stdout, errOut)
+	app := cli.New(cfg, stdout, errOut)
 	if err := app.Run(context.Background()); err != nil {
 		fmt.Fprintf(errOut, "run error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
-func openErrorOutput(cfg config.Config) (io.Writer, func() error, error) {
+func openErrorOutput(cfg config.Config, baseErr io.Writer) (io.Writer, func() error, error) {
 	if cfg.LogFile == "" {
-		return os.Stderr, func() error { return nil }, nil
+		return baseErr, func() error { return nil }, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.LogFile), 0o755); err != nil {
 		return nil, nil, err
@@ -85,5 +102,5 @@ func openErrorOutput(cfg config.Config) (io.Writer, func() error, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return io.MultiWriter(os.Stderr, file), file.Close, nil
+	return io.MultiWriter(baseErr, file), file.Close, nil
 }

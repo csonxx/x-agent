@@ -174,6 +174,14 @@ type rawOptions struct {
 	hookEventFile              string
 }
 
+type HelpError struct {
+	Usage string
+}
+
+func (e *HelpError) Error() string {
+	return "help requested"
+}
+
 func Load() (Config, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -192,6 +200,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	raw := rawOptions{
 		workingDir: currentWD,
 	}
+	providerAfterFile := normalizeProviderName(cfg.Provider)
 
 	if versionMode(args) {
 		cfg.ShowVersion = true
@@ -215,10 +224,12 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 		cfg.ConfigFile = configPath
 		applyFileConfig(&cfg, &raw, fileCfg, filepath.Dir(configPath))
 	}
+	providerAfterFile = normalizeProviderName(cfg.Provider)
 
 	if err := applyEnvConfig(&cfg, &raw, lookup); err != nil {
 		return Config{}, err
 	}
+	providerAfterEnv := normalizeProviderName(cfg.Provider)
 
 	fs := flag.NewFlagSet("xxx-code", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -286,6 +297,9 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	logFileFlag := fs.String("log-file", cfg.LogFile, "Append diagnostic logs and stderr output to this file")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return cfg, &HelpError{Usage: buildFlagUsage(fs)}
+		}
 		return Config{}, err
 	}
 
@@ -308,6 +322,24 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 			cfg.LogLevel = diag.LevelInfo
 		}
 	}
+
+	providerChangedByHigherPrecedence := providerAfterEnv != providerAfterFile
+	if visited["provider"] && normalizeProviderName(cfg.Provider) != providerAfterEnv {
+		providerChangedByHigherPrecedence = true
+	}
+	if providerChangedByHigherPrecedence {
+		if !visited["api-key"] && !hasNonEmptyEnv(lookup, "XXX_CODE_API_KEY") {
+			cfg.APIKey = ""
+		}
+		if !visited["base-url"] && !hasNonEmptyEnv(lookup, "XXX_CODE_BASE_URL") {
+			cfg.BaseURL = ""
+		}
+	}
+	applySelectedProviderEnvConfig(&cfg, lookup, providerEnvOptions{
+		AllowAPIKey:  !visited["api-key"] && !hasNonEmptyEnv(lookup, "XXX_CODE_API_KEY"),
+		AllowBaseURL: !visited["base-url"] && !hasNonEmptyEnv(lookup, "XXX_CODE_BASE_URL"),
+		AllowVersion: !visited["anthropic-version"] && !hasNonEmptyEnv(lookup, "XXX_CODE_API_VERSION"),
+	})
 
 	cfg.WorkingDir = filepath.Clean(resolvePath(currentWD, *cwdFlag))
 	cfg.SessionFile = defaultSessionFile(cfg.WorkingDir, *sessionFileFlag)
@@ -514,7 +546,6 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 	if value, ok := lookup("XXX_CODE_API_VERSION"); ok {
 		cfg.Version = strings.TrimSpace(value)
 	}
-	applyProviderEnvConfig(cfg, lookup)
 	if value, ok := lookup("XXX_CODE_MODEL"); ok {
 		cfg.Model = strings.TrimSpace(value)
 	}
@@ -610,63 +641,65 @@ func applyEnvConfig(cfg *Config, raw *rawOptions, lookup func(string) (string, b
 	return nil
 }
 
-func applyProviderEnvConfig(cfg *Config, lookup func(string) (string, bool)) {
+type providerEnvOptions struct {
+	AllowAPIKey  bool
+	AllowBaseURL bool
+	AllowVersion bool
+}
+
+func applySelectedProviderEnvConfig(cfg *Config, lookup func(string) (string, bool), options providerEnvOptions) {
+	setIfAllowed := func(target *string, key string, allow bool) {
+		if !allow {
+			return
+		}
+		if value, ok := lookup(key); ok && strings.TrimSpace(value) != "" {
+			*target = strings.TrimSpace(value)
+		}
+	}
+
 	switch normalizeProviderName(cfg.Provider) {
 	case "", "anthropic":
-		if value, ok := lookup("ANTHROPIC_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		}
-		if value, ok := lookup("ANTHROPIC_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
-		}
-		if value, ok := lookup("ANTHROPIC_VERSION"); ok {
-			cfg.Version = strings.TrimSpace(value)
-		}
+		setIfAllowed(&cfg.APIKey, "ANTHROPIC_API_KEY", options.AllowAPIKey)
+		setIfAllowed(&cfg.BaseURL, "ANTHROPIC_BASE_URL", options.AllowBaseURL)
+		setIfAllowed(&cfg.Version, "ANTHROPIC_VERSION", options.AllowVersion)
 	case "openai":
-		if value, ok := lookup("OPENAI_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		}
-		if value, ok := lookup("OPENAI_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
-		}
+		setIfAllowed(&cfg.APIKey, "OPENAI_API_KEY", options.AllowAPIKey)
+		setIfAllowed(&cfg.BaseURL, "OPENAI_BASE_URL", options.AllowBaseURL)
 	case "azure-openai":
-		if value, ok := lookup("AZURE_OPENAI_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		} else if value, ok := lookup("OPENAI_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
+		if options.AllowAPIKey {
+			if value, ok := lookup("AZURE_OPENAI_API_KEY"); ok && strings.TrimSpace(value) != "" {
+				cfg.APIKey = strings.TrimSpace(value)
+			} else {
+				setIfAllowed(&cfg.APIKey, "OPENAI_API_KEY", true)
+			}
 		}
-		if value, ok := lookup("AZURE_OPENAI_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
-		} else if value, ok := lookup("OPENAI_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
+		if options.AllowBaseURL {
+			if value, ok := lookup("AZURE_OPENAI_BASE_URL"); ok && strings.TrimSpace(value) != "" {
+				cfg.BaseURL = strings.TrimSpace(value)
+			} else {
+				setIfAllowed(&cfg.BaseURL, "OPENAI_BASE_URL", true)
+			}
 		}
 	case "gemini":
-		if value, ok := lookup("GEMINI_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		}
-		if value, ok := lookup("GEMINI_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
-		}
+		setIfAllowed(&cfg.APIKey, "GEMINI_API_KEY", options.AllowAPIKey)
+		setIfAllowed(&cfg.BaseURL, "GEMINI_BASE_URL", options.AllowBaseURL)
 	case "minimax":
-		if value, ok := lookup("MINIMAX_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		}
-		if value, ok := lookup("MINIMAX_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
-		}
+		setIfAllowed(&cfg.APIKey, "MINIMAX_API_KEY", options.AllowAPIKey)
+		setIfAllowed(&cfg.BaseURL, "MINIMAX_BASE_URL", options.AllowBaseURL)
 	case "glm":
-		if value, ok := lookup("GLM_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		} else if value, ok := lookup("ZHIPUAI_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		} else if value, ok := lookup("BIGMODEL_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
-		} else if value, ok := lookup("ZAI_API_KEY"); ok {
-			cfg.APIKey = strings.TrimSpace(value)
+		if options.AllowAPIKey {
+			switch {
+			case hasNonEmptyEnv(lookup, "GLM_API_KEY"):
+				setIfAllowed(&cfg.APIKey, "GLM_API_KEY", true)
+			case hasNonEmptyEnv(lookup, "ZHIPUAI_API_KEY"):
+				setIfAllowed(&cfg.APIKey, "ZHIPUAI_API_KEY", true)
+			case hasNonEmptyEnv(lookup, "BIGMODEL_API_KEY"):
+				setIfAllowed(&cfg.APIKey, "BIGMODEL_API_KEY", true)
+			default:
+				setIfAllowed(&cfg.APIKey, "ZAI_API_KEY", true)
+			}
 		}
-		if value, ok := lookup("GLM_BASE_URL"); ok {
-			cfg.BaseURL = strings.TrimSpace(value)
-		}
+		setIfAllowed(&cfg.BaseURL, "GLM_BASE_URL", options.AllowBaseURL)
 	}
 }
 
@@ -978,6 +1011,21 @@ func joinCSV(values []string) string {
 		parts = append(parts, value)
 	}
 	return strings.Join(parts, ",")
+}
+
+func hasNonEmptyEnv(lookup func(string) (string, bool), key string) bool {
+	value, ok := lookup(key)
+	return ok && strings.TrimSpace(value) != ""
+}
+
+func buildFlagUsage(fs *flag.FlagSet) string {
+	var builder strings.Builder
+	builder.WriteString("Usage: xxx-code [flags] [prompt]\n\n")
+	builder.WriteString("Flags:\n")
+	fs.SetOutput(&builder)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+	return builder.String()
 }
 
 func appendUniquePaths(base []string, extra ...string) []string {

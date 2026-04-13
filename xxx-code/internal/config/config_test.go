@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/diag"
@@ -149,6 +151,26 @@ func TestLoadArgsVersionModesDoNotRequireAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoadArgsReturnsHelpError(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := LoadArgs([]string{"--help"}, lookupFromMap(nil), dir)
+	if err == nil {
+		t.Fatal("expected help flag to return a help error")
+	}
+
+	var helpErr *HelpError
+	if !errors.As(err, &helpErr) {
+		t.Fatalf("expected HelpError, got %T (%v)", err, err)
+	}
+	if helpErr.Usage == "" {
+		t.Fatal("expected help usage text")
+	}
+	if want := "Usage: xxx-code [flags] [prompt]"; !strings.HasPrefix(helpErr.Usage, want) {
+		t.Fatalf("unexpected help prefix: %q", helpErr.Usage)
+	}
+}
+
 func TestLoadArgsParsesDaemonGovernanceOptions(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{
@@ -208,6 +230,28 @@ func TestLoadArgsSupportsOpenAIProviderEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if cfg.Provider != "openai" {
+		t.Fatalf("unexpected provider: %q", cfg.Provider)
+	}
+	if cfg.APIKey != "openai-key" {
+		t.Fatalf("unexpected api key: %q", cfg.APIKey)
+	}
+	if cfg.BaseURL != "https://example.openai.test/v1" {
+		t.Fatalf("unexpected base url: %q", cfg.BaseURL)
+	}
+}
+
+func TestLoadArgsSupportsOpenAIProviderEnvWhenProviderComesFromFlag(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{
+		"OPENAI_API_KEY":  "openai-key",
+		"OPENAI_BASE_URL": "https://example.openai.test/v1",
+	}
+
+	cfg, err := LoadArgs([]string{"--provider", "openai", "--model", "gpt-4.1"}, lookupFromMap(env), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.Provider != "openai" {
 		t.Fatalf("unexpected provider: %q", cfg.Provider)
 	}
@@ -339,6 +383,25 @@ func TestLoadArgsRejectsUnknownProvider(t *testing.T) {
 	}), dir)
 	if err == nil {
 		t.Fatal("expected unknown provider to fail")
+	}
+}
+
+func TestLoadArgsRejectsStaleAPIKeyWhenProviderChanges(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, ".xxx-code")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("provider: anthropic\napi_key: anthropic-key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadArgs([]string{"--provider", "openai"}, lookupFromMap(nil), dir)
+	if err == nil {
+		t.Fatal("expected provider switch without matching credentials to fail")
+	}
+	if !strings.Contains(err.Error(), "OPENAI_API_KEY") {
+		t.Fatalf("expected openai credential error, got %v", err)
 	}
 }
 
