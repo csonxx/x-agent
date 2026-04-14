@@ -11,8 +11,28 @@ import (
 	"time"
 
 	"github.com/caowenhua/x-agent/xxx-code/internal/config"
+	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
+	"github.com/caowenhua/x-agent/xxx-code/internal/persist"
 	pluginruntime "github.com/caowenhua/x-agent/xxx-code/internal/plugins"
 )
+
+type cliPromptProvider struct{}
+
+func (p *cliPromptProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestCLIUserText(request.Messages)),
+	}, nil
+}
+
+func latestCLIUserText(messages []engine.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == engine.RoleUser {
+			return messages[i].Text()
+		}
+	}
+	return ""
+}
 
 func TestHandleCommandHelpIncludesPluginLifecycleCommands(t *testing.T) {
 	app, out, _ := newTestApp(t)
@@ -67,6 +87,146 @@ func TestHandleCommandPluginLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(app.config.WorkingDir, ".xxx-code", "plugins", "echoer")); !os.IsNotExist(err) {
 		t.Fatalf("expected plugin directory to be removed, got err=%v", err)
+	}
+}
+
+func TestRunPromptSavesSession(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	installPromptRunner(app)
+
+	result, err := app.runPrompt(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "reply:hello" {
+		t.Fatalf("unexpected final text: %q", result.FinalText)
+	}
+
+	state, err := persist.Load(app.config.SessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Main) != 2 {
+		t.Fatalf("expected saved session with 2 messages, got %d", len(state.Main))
+	}
+}
+
+func TestPrintEventHandlesStreamingVerboseAndHooks(t *testing.T) {
+	app, out, errOut := newTestApp(t)
+	app.config.Verbose = true
+
+	app.printEvent(engine.Event{Kind: engine.EventAssistantTextDelta, Text: "hello"})
+	app.printEvent(engine.Event{Kind: engine.EventAssistantTextDone})
+	app.printEvent(engine.Event{Kind: engine.EventToolCall, ToolName: "bash", Text: `{"command":"pwd"}`})
+	app.printEvent(engine.Event{Kind: engine.EventToolResult, ToolName: "bash", Text: `{"output":"/tmp"}`})
+	app.printEvent(engine.Event{Kind: engine.EventAssistantText, AgentName: "worker", Text: "done"})
+	app.printEvent(engine.Event{Kind: engine.EventHookError, Text: "boom"})
+
+	if got := out.String(); !strings.Contains(got, "hello\n[worker] done\n") {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+	if got := errOut.String(); !strings.Contains(got, "tool bash") || !strings.Contains(got, "tool-result bash") || !strings.Contains(got, "hook error: boom") {
+		t.Fatalf("unexpected stderr: %q", got)
+	}
+}
+
+func TestHandleEventAutosavesAgentLifecycle(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	app.session.Append(engine.NewTextMessage(engine.RoleUser, "hello"))
+
+	app.handleEvent(engine.Event{Kind: engine.EventAgentSpawned, AgentID: "agent_1", AgentName: "worker"})
+
+	if _, err := os.Stat(app.config.SessionFile); err != nil {
+		t.Fatalf("expected session file to be written, got %v", err)
+	}
+}
+
+func TestParseLocalPromptArguments(t *testing.T) {
+	values, err := parseLocalPromptArguments([]string{"name=alice", "mode=fast"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["name"] != "alice" || values["mode"] != "fast" {
+		t.Fatalf("unexpected parsed values: %+v", values)
+	}
+
+	_, err = parseLocalPromptArguments([]string{"invalid"})
+	if err == nil || !strings.Contains(err.Error(), "expected key=value") {
+		t.Fatalf("expected parse error, got %v", err)
+	}
+}
+
+func TestRunPrintModeSavesSession(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	installPromptRunner(app)
+	app.config.Print = true
+	app.config.Prompt = "hello"
+
+	if err := app.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := persist.Load(app.config.SessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Main) != 2 {
+		t.Fatalf("expected persisted print-mode session, got %d messages", len(state.Main))
+	}
+}
+
+func TestRunREPLProcessesPromptAndQuit(t *testing.T) {
+	app, out, errOut := newTestApp(t)
+	installPromptRunner(app)
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readPipe.Close()
+
+	oldStdin := os.Stdin
+	os.Stdin = readPipe
+	defer func() { os.Stdin = oldStdin }()
+
+	if _, err := writePipe.WriteString("hello\n:quit\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePipe.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.runREPL(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "xxx-code (test-model)") || !strings.Contains(got, "reply:hello") {
+		t.Fatalf("unexpected repl output: %q", got)
+	}
+	if got := errOut.String(); got != "" {
+		t.Fatalf("unexpected repl stderr: %q", got)
+	}
+}
+
+func TestResumeRestoresPersistedSession(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	installPromptRunner(app)
+	if _, err := app.runPrompt(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	restored := New(app.config, &out, &errOut)
+	t.Cleanup(func() {
+		_ = restored.closePlugins()
+		_ = restored.closeMCP()
+	})
+
+	if err := restored.resume(); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.session.Snapshot()) != 2 {
+		t.Fatalf("expected restored session to have 2 messages, got %d", len(restored.session.Snapshot()))
 	}
 }
 
@@ -135,6 +295,30 @@ func newTestApp(t *testing.T) (*App, *bytes.Buffer, *bytes.Buffer) {
 		_ = app.closeMCP()
 	})
 	return app, &out, &errOut
+}
+
+func installPromptRunner(app *App) {
+	app.runner = engine.NewRunner(&cliPromptProvider{}, app.registry, engine.RunnerConfig{
+		Model:               app.config.Model,
+		SystemPrompt:        app.config.SystemPrompt,
+		MaxTokens:           app.config.MaxTokens,
+		MaxTurns:            app.config.MaxTurns,
+		StreamResponses:     false,
+		ContextBudget:       app.config.ContextBudget,
+		CompactKeepMessages: app.config.CompactKeep,
+		WorkingDir:          app.config.WorkingDir,
+		ToolTimeout:         app.config.ToolTimeout,
+		HookTimeout:         app.config.HookTimeout,
+		MaxAgentDepth:       3,
+		MaxParallelAgents:   app.config.MaxParallelAgents,
+		PermissionPolicy: engine.PermissionPolicy{
+			ReadRoots:   app.config.ReadRoots,
+			WriteRoots:  app.config.WriteRoots,
+			ReadOnly:    app.config.ReadOnly,
+			BashEnabled: app.config.BashEnabled,
+		},
+		EventHandler: app.handleEvent,
+	})
 }
 
 func writeCLIPluginSource(t *testing.T, rootDir, pluginName, script string) string {

@@ -131,6 +131,31 @@ allow_read:
 	}
 }
 
+func TestLoadArgsLoadsExplicitJSONConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom.json")
+	configBody := `{"provider":"gemini","model":"gemini-2.5-pro","allow_read":["docs"]}`
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadArgs([]string{"--config", configPath}, lookupFromMap(map[string]string{
+		"GEMINI_API_KEY": "gemini-key",
+	}), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConfigFile != configPath {
+		t.Fatalf("unexpected config path: %q", cfg.ConfigFile)
+	}
+	if cfg.Provider != "gemini" || cfg.Model != "gemini-2.5-pro" {
+		t.Fatalf("unexpected json config payload: %+v", cfg)
+	}
+	if len(cfg.ReadRoots) != 2 || cfg.ReadRoots[1] != filepath.Join(dir, "docs") {
+		t.Fatalf("unexpected read roots: %+v", cfg.ReadRoots)
+	}
+}
+
 func TestLoadArgsVersionModesDoNotRequireAPIKey(t *testing.T) {
 	dir := t.TempDir()
 

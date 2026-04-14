@@ -41,6 +41,8 @@ type remoteStreamingTestProvider struct{}
 
 type remoteWorkflowProvider struct{}
 
+type remoteAgentProvider struct{}
+
 type remoteBlockingProvider struct{}
 
 type remoteMCPToolProvider struct{}
@@ -99,6 +101,54 @@ func (p *remoteWorkflowProvider) CreateMessage(ctx context.Context, request engi
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestRemoteUserText(request.Messages)),
 	}, nil
+}
+
+func (p *remoteAgentProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	if toolResult, ok := latestRemoteToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "tool-result:"+toolResult),
+		}, nil
+	}
+
+	switch prompt := latestRemoteUserText(request.Messages); prompt {
+	case "delegate work":
+		input, _ := json.Marshal(map[string]any{
+			"name":       "worker",
+			"prompt":     "child task",
+			"background": false,
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "delegating"},
+					{Type: engine.BlockToolUse, ID: "toolu_delegate", Name: "agent_spawn", Input: input},
+				},
+			},
+		}, nil
+	case "background work":
+		input, _ := json.Marshal(map[string]any{
+			"name":       "worker",
+			"prompt":     "block child",
+			"background": true,
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "delegating"},
+					{Type: engine.BlockToolUse, ID: "toolu_delegate_bg", Name: "agent_spawn", Input: input},
+				},
+			},
+		}, nil
+	case "block child":
+		<-ctx.Done()
+		return engine.CompletionResponse{}, ctx.Err()
+	default:
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+prompt),
+		}, nil
+	}
 }
 
 func (p *remoteBlockingProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
@@ -656,6 +706,122 @@ func TestClientCanQueryWorkflowTasksAndResumeSelectedRemoteTask(t *testing.T) {
 	}
 	if byName["two"].Attempts != 1 {
 		t.Fatalf("expected unselected task to keep prior attempts, got %+v", byName["two"])
+	}
+}
+
+func TestClientCanInspectWorkflowDetails(t *testing.T) {
+	cfg := newTestConfig(t)
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteWorkflowProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "workflow-detail-remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), session.ID, "fanout work", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	workflows, err := client.ListWorkflows(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("expected one workflow, got %d", len(workflows))
+	}
+
+	snapshot, err := client.GetWorkflow(context.Background(), session.ID, workflows[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ID != workflows[0].ID || snapshot.Status != tools.WorkflowCompleted {
+		t.Fatalf("unexpected workflow snapshot: %+v", snapshot)
+	}
+}
+
+func TestClientCanListWaitSendAndCancelAgents(t *testing.T) {
+	cfg := newTestConfig(t)
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &remoteAgentProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := NewClient(httpServer.URL, "", httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "agent-remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), session.ID, "delegate work", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := client.ListAgents(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected one delegated agent, got %d", len(agents))
+	}
+
+	waited, err := client.WaitAgent(context.Background(), session.ID, agents[0].ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waited.Status != engine.AgentIdle {
+		t.Fatalf("expected idle delegated agent, got %+v", waited)
+	}
+
+	sent, err := client.SendAgent(context.Background(), session.ID, agents[0].ID, "follow-up", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.Status != engine.AgentIdle || sent.Result != "reply:follow-up" {
+		t.Fatalf("unexpected agent send result: %+v", sent)
+	}
+
+	backgroundSession, err := client.EnsureSession(context.Background(), "agent-remote-background")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.RunTurn(context.Background(), backgroundSession.ID, "background work", 0); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = client.ListAgents(context.Background(), backgroundSession.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) < 1 {
+		t.Fatalf("expected background agent to be tracked, got %+v", agents)
+	}
+
+	var backgroundID string
+	for _, agent := range agents {
+		if agent.Prompt == "block child" {
+			backgroundID = agent.ID
+			break
+		}
+	}
+	if backgroundID == "" {
+		t.Fatalf("expected to find background agent in %+v", agents)
+	}
+
+	cancelled, err := client.CancelAgent(context.Background(), backgroundSession.ID, backgroundID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != engine.AgentCancelled {
+		t.Fatalf("expected cancelled background agent, got %+v", cancelled)
 	}
 }
 
