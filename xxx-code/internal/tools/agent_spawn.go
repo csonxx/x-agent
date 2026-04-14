@@ -312,8 +312,8 @@ func (t *AgentFanoutTool) Definition() engine.ToolDefinition {
 }
 
 func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionContext, input json.RawMessage) (engine.ToolResult, error) {
-	var args agentFanoutInput
-	if err := json.Unmarshal(input, &args); err != nil {
+	args, err := decodeAgentFanoutInput(input)
+	if err != nil {
 		return engine.ToolResult{}, err
 	}
 	if len(args.Tasks) == 0 {
@@ -450,6 +450,61 @@ func (t *AgentFanoutTool) Call(ctx context.Context, execCtx *engine.ExecutionCon
 		}),
 		IsError: hasAgentErrors(snapshots),
 	}, nil
+}
+
+func decodeAgentFanoutInput(input json.RawMessage) (agentFanoutInput, error) {
+	type fanoutAlias struct {
+		Tasks                json.RawMessage `json:"tasks"`
+		Wait                 bool            `json:"wait,omitempty"`
+		MaxParallel          int             `json:"max_parallel,omitempty"`
+		ResourceLimits       map[string]int  `json:"resource_limits,omitempty"`
+		FailFast             bool            `json:"fail_fast,omitempty"`
+		PreemptLowerPriority bool            `json:"preempt_lower_priority,omitempty"`
+		TimeoutSeconds       int             `json:"timeout_seconds,omitempty"`
+	}
+
+	var raw fanoutAlias
+	if err := json.Unmarshal(input, &raw); err != nil {
+		return agentFanoutInput{}, err
+	}
+
+	tasks, err := decodeTaskList(raw.Tasks)
+	if err != nil {
+		return agentFanoutInput{}, err
+	}
+
+	return agentFanoutInput{
+		Tasks:                tasks,
+		Wait:                 raw.Wait,
+		MaxParallel:          raw.MaxParallel,
+		ResourceLimits:       raw.ResourceLimits,
+		FailFast:             raw.FailFast,
+		PreemptLowerPriority: raw.PreemptLowerPriority,
+		TimeoutSeconds:       raw.TimeoutSeconds,
+	}, nil
+}
+
+func decodeTaskList(raw json.RawMessage) ([]agentTaskInput, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var tasks []agentTaskInput
+	if err := json.Unmarshal(raw, &tasks); err == nil {
+		return tasks, nil
+	}
+
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(encoded) == "" {
+		return nil, nil
+	}
+	if err := json.Unmarshal([]byte(encoded), &tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
 }
 
 type AgentCancelTool struct{}

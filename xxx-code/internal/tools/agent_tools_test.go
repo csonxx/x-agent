@@ -199,6 +199,40 @@ func TestAgentFanoutToolWaitsForBatch(t *testing.T) {
 	}
 }
 
+func TestAgentFanoutToolAcceptsStringifiedTasks(t *testing.T) {
+	dir := t.TempDir()
+	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{
+		Model:             "test-model",
+		SystemPrompt:      "test",
+		MaxTurns:          4,
+		WorkingDir:        dir,
+		MaxParallelAgents: 2,
+	})
+
+	execCtx := &engine.ExecutionContext{
+		Runner:     runner,
+		Session:    engine.NewSession(),
+		WorkingDir: dir,
+	}
+
+	tasksJSON := `[{"name":"one","prompt":"task one"},{"name":"two","prompt":"task two"}]`
+	input, _ := json.Marshal(map[string]any{
+		"wait":  true,
+		"tasks": tasksJSON,
+	})
+
+	result, err := (&AgentFanoutTool{}).Call(context.Background(), execCtx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success for stringified tasks, got %s", result.Content)
+	}
+	if !strings.Contains(result.Content, `"task one"`) || !strings.Contains(result.Content, `"task two"`) {
+		t.Fatalf("expected both tasks in result, got %s", result.Content)
+	}
+}
+
 func TestAgentWaitToolCanWaitAll(t *testing.T) {
 	dir := t.TempDir()
 	runner := engine.NewRunner(&toolPromptProvider{}, engine.NewRegistry(), engine.RunnerConfig{

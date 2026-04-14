@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,8 @@ type countingTool struct {
 	calls int
 }
 
+type workingDirTool struct{}
+
 func (t *echoTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name:        "echo_tool",
@@ -60,6 +63,20 @@ func (t *countingTool) Definition() ToolDefinition {
 func (t *countingTool) Call(ctx context.Context, exec *ExecutionContext, input json.RawMessage) (ToolResult, error) {
 	t.calls++
 	return (&echoTool{}).Call(ctx, exec, input)
+}
+
+func (t *workingDirTool) Definition() ToolDefinition {
+	return ToolDefinition{
+		Name:        "working_dir_tool",
+		Description: "Return the current execution working directory",
+		InputSchema: map[string]any{"type": "object"},
+	}
+}
+
+func (t *workingDirTool) Call(ctx context.Context, exec *ExecutionContext, input json.RawMessage) (ToolResult, error) {
+	_ = ctx
+	_ = input
+	return ToolResult{Content: exec.WorkingDir}, nil
 }
 
 func TestRunnerExecutesToolLoop(t *testing.T) {
@@ -129,6 +146,37 @@ func latestUserText(messages []Message) string {
 	return ""
 }
 
+func latestToolResult(messages []Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		for _, block := range messages[i].Content {
+			if block.Type == BlockToolResult {
+				return strings.TrimSpace(block.Result)
+			}
+		}
+	}
+	return ""
+}
+
+type agentWorkingDirProvider struct{}
+
+func (p *agentWorkingDirProvider) CreateMessage(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
+	_ = ctx
+	if toolResult := latestToolResult(request.Messages); toolResult != "" {
+		return CompletionResponse{
+			Message: NewTextMessage(RoleAssistant, "dir:"+toolResult),
+		}, nil
+	}
+	input, _ := json.Marshal(map[string]any{})
+	return CompletionResponse{
+		Message: Message{
+			Role: RoleAssistant,
+			Content: []Block{
+				{Type: BlockToolUse, ID: "tool-dir", Name: "working_dir_tool", Input: input},
+			},
+		},
+	}, nil
+}
+
 func TestRunnerCanReuseSpawnedAgent(t *testing.T) {
 	runner := NewRunner(&promptProvider{}, NewRegistry(), RunnerConfig{
 		Model:        "test-model",
@@ -176,6 +224,37 @@ func TestRunnerCanReuseSpawnedAgent(t *testing.T) {
 	joined := strings.Join(gotTexts, " | ")
 	if !strings.Contains(joined, "first task") || !strings.Contains(joined, "second task") {
 		t.Fatalf("expected preserved agent history, got %q", joined)
+	}
+}
+
+func TestSpawnAgentResolvesRelativeWorkingDirAgainstParent(t *testing.T) {
+	baseDir := t.TempDir()
+	runner := NewRunner(&agentWorkingDirProvider{}, NewRegistry(&workingDirTool{}), RunnerConfig{
+		Model:        "test-model",
+		SystemPrompt: "test",
+		MaxTurns:     4,
+		WorkingDir:   filepath.Join(baseDir, "fallback"),
+	})
+
+	parentExec := &ExecutionContext{
+		Runner:     runner,
+		Session:    NewSession(),
+		WorkingDir: baseDir,
+	}
+
+	snapshot, err := runner.SpawnAgent(parentExec, SpawnRequest{
+		Name:       "worker",
+		Prompt:     "report dir",
+		WorkingDir: ".",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != AgentIdle {
+		t.Fatalf("expected idle status, got %s", snapshot.Status)
+	}
+	if snapshot.Result != "dir:"+baseDir {
+		t.Fatalf("expected child working dir %q, got %q", baseDir, snapshot.Result)
 	}
 }
 

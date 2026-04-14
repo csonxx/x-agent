@@ -256,7 +256,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	fs.StringVar(&cfg.RemoteURL, "remote-url", cfg.RemoteURL, "Daemon base URL to use as a remote bridge")
 	fs.StringVar(&cfg.RemoteSession, "remote-session", cfg.RemoteSession, "Remote daemon session ID to open or create")
 	fs.BoolVar(&cfg.RemoteList, "remote-list-sessions", cfg.RemoteList, "List daemon sessions instead of running a local session")
-	fs.BoolVar(&cfg.ReadOnly, "read-only", cfg.ReadOnly, "Disable write_file and edit_file tool writes")
+	fs.BoolVar(&cfg.ReadOnly, "read-only", cfg.ReadOnly, "Best-effort block file writes, including write_file/edit_file and bash commands that look like writes")
 	fs.BoolVar(&cfg.BashEnabled, "bash", cfg.BashEnabled, "Enable or disable the bash tool")
 	fs.BoolVar(&cfg.Print, "print", cfg.Print, "Run once and exit")
 	fs.BoolVar(&cfg.TUI, "tui", cfg.TUI, "Run an interactive terminal UI instead of the line-oriented REPL")

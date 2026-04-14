@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 type PermissionPolicy struct {
@@ -40,6 +41,9 @@ func (r *Runner) EnsureBash(command string) error {
 		return err
 	}
 	trimmed := strings.TrimSpace(command)
+	if policy.ReadOnly && bashCommandMayWrite(trimmed) {
+		return fmt.Errorf("bash command %q may modify files and is blocked by read-only mode", trimmed)
+	}
 	if matchesAnyPrefix(trimmed, policy.BashBlockedPrefixes) {
 		return fmt.Errorf("bash command %q is blocked by policy", trimmed)
 	}
@@ -47,6 +51,63 @@ func (r *Runner) EnsureBash(command string) error {
 		return fmt.Errorf("bash command %q does not match any allowed command prefix", trimmed)
 	}
 	return nil
+}
+
+func bashCommandMayWrite(command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	if hasBashWriteRedirection(command) {
+		return true
+	}
+
+	fields := strings.FieldsFunc(command, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("|&;()", r)
+	})
+	for i := 0; i < len(fields); i++ {
+		token := strings.ToLower(strings.TrimSpace(fields[i]))
+		switch token {
+		case "tee", "touch", "mkdir", "rmdir", "rm", "mv", "cp", "ln", "chmod", "chown", "truncate", "install":
+			return true
+		case "sed":
+			if i+1 < len(fields) && strings.HasPrefix(strings.ToLower(fields[i+1]), "-i") {
+				return true
+			}
+		case "perl":
+			if i+1 < len(fields) && strings.Contains(strings.ToLower(fields[i+1]), "-pi") {
+				return true
+			}
+		case "git":
+			if i+1 >= len(fields) {
+				continue
+			}
+			switch strings.ToLower(fields[i+1]) {
+			case "add", "am", "apply", "checkout", "cherry-pick", "clean", "clone", "commit", "init", "merge", "mv", "pull", "rebase", "restore", "revert", "rm", "stash", "switch":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasBashWriteRedirection(command string) bool {
+	for i := 0; i < len(command); i++ {
+		if command[i] != '>' {
+			continue
+		}
+		if i+1 < len(command) && command[i+1] == '&' {
+			continue
+		}
+		if i+1 < len(command) && command[i+1] == '>' {
+			if i+2 < len(command) && command[i+2] == '&' {
+				continue
+			}
+			return true
+		}
+		return true
+	}
+	return false
 }
 
 func (r *Runner) EnsureTool(name string) error {

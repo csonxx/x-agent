@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -178,6 +179,7 @@ func (r *Runner) SpawnAgent(parent *ExecutionContext, request SpawnRequest) (Age
 		parentID = parent.AgentID
 	}
 
+	request.WorkingDir = resolveAgentWorkingDir(agentBaseWorkingDir(r.config.WorkingDir, parent), request.WorkingDir)
 	childRunner := r.cloneForAgent(request)
 	childSession := NewSession()
 	if request.InheritHistory && parent != nil && parent.Session != nil {
@@ -695,4 +697,26 @@ func (r *Runner) cloneForAgent(request SpawnRequest) *Runner {
 		config:     cfg,
 		agentState: r.agentState,
 	}
+}
+
+func agentBaseWorkingDir(defaultDir string, parent *ExecutionContext) string {
+	if parent != nil && strings.TrimSpace(parent.WorkingDir) != "" {
+		return parent.WorkingDir
+	}
+	return defaultDir
+}
+
+func resolveAgentWorkingDir(baseDir, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return ""
+	}
+	if filepath.IsAbs(requested) {
+		return filepath.Clean(requested)
+	}
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return filepath.Clean(requested)
+	}
+	return filepath.Clean(filepath.Join(baseDir, requested))
 }
