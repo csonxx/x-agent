@@ -33,6 +33,8 @@ type selectiveWorkflowStoryProvider struct{}
 
 type policyHookStoryProvider struct{}
 
+type timeoutStoryProvider struct{}
+
 func (p *toolStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 
@@ -189,6 +191,12 @@ func (p *policyHookStoryProvider) CreateMessage(ctx context.Context, request eng
 	return engine.CompletionResponse{
 		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestUserText(request.Messages)),
 	}, nil
+}
+
+func (p *timeoutStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = request
+	<-ctx.Done()
+	return engine.CompletionResponse{}, ctx.Err()
 }
 
 func workflowStoryResponse(ctx context.Context, request engine.CompletionRequest, failChild bool) (engine.CompletionResponse, error) {
@@ -405,6 +413,62 @@ func TestUserStoryOperatorCanInspectMCPResourcesTemplatesAndPrompts(t *testing.T
 	}
 	if len(prompt.Messages) != 1 || !strings.Contains(prompt.Messages[0].Content, "Say hi to Pat") {
 		t.Fatalf("expected MCP prompt details to include caller argument, got %+v", prompt)
+	}
+}
+
+func TestUserStoryUserCanUseStdioMCPToolsAcrossTurns(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server, httpServer, cfg := newDaemonHarness(t, &toolStoryProvider{}, func(cfg *config.Config) {
+		configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "command": %q,
+      "args": ["-test.run=TestIntegrationMCPHelperProcess", "--", "mcp-echo-server"],
+      "env": {"GO_WANT_INTEGRATION_MCP_HELPER": "1"}
+    }
+  }
+}`, exe)
+		if err := os.WriteFile(filepath.Join(cfg.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+			t.Fatalf("write stdio mcp config: %v", err)
+		}
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-mcp-stdio")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := client.GetMCP(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ServerCount != 1 || summary.ToolCount != 1 {
+		t.Fatalf("expected one connected stdio MCP server, got %+v", summary)
+	}
+
+	first, _, err := client.RunTurn(context.Background(), session.ID, "use reloaded mcp", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.FinalText, "story via mcp") {
+		t.Fatalf("expected stdio MCP result in first turn, got %+v", first)
+	}
+
+	second, _, err := client.RunTurn(context.Background(), session.ID, "use reloaded mcp", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(second.FinalText, "story via mcp") {
+		t.Fatalf("expected stdio MCP result in second turn, got %+v", second)
 	}
 }
 
@@ -900,6 +964,105 @@ func TestUserStoryOperatorCanReturnStructuredBackoffWhenClientsHitRateLimits(t *
 	}
 }
 
+func TestUserStoryOperatorCanRejectBrokenPluginBeforeInstall(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &toolStoryProvider{}, nil)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-plugin-invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	brokenDir := filepath.Join(cfg.WorkingDir, "plugin-sources", "broken")
+	if err := os.MkdirAll(brokenDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brokenManifest := `{
+  "name": "",
+  "tools": [{
+    "name": "echo",
+    "description": "",
+    "input_schema": {"type": "object"},
+    "command": "./missing-tool.sh"
+  }]
+}`
+	if err := os.WriteFile(filepath.Join(brokenDir, "plugin.json"), []byte(brokenManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := client.ValidatePlugin(context.Background(), session.ID, brokenDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Valid || report.IssueCount == 0 {
+		t.Fatalf("expected broken plugin validation report, got %+v", report)
+	}
+
+	_, err = client.InstallPlugin(context.Background(), session.ID, brokenDir, false)
+	if err == nil {
+		t.Fatal("expected broken plugin install to fail")
+	}
+	var remoteErr *remote.Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != http.StatusBadRequest || remoteErr.Code != "invalid_request" {
+		t.Fatalf("expected invalid_request install failure, got %v", err)
+	}
+	if !strings.Contains(strings.ToLower(remoteErr.Message), "plugin validation failed") {
+		t.Fatalf("expected validation failure details, got %+v", remoteErr)
+	}
+}
+
+func TestUserStoryOperatorCanRemovePluginAndSeeSubsequentCallsFailCleanly(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &toolStoryProvider{}, nil)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-plugin-remove")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sourceDir := writeIntegrationPluginSource(t, filepath.Join(cfg.WorkingDir, "plugin-sources"), "echoer", "#!/bin/sh\ncat\n")
+	if _, err := client.InstallPlugin(context.Background(), session.ID, sourceDir, false); err != nil {
+		t.Fatal(err)
+	}
+
+	working, _, err := client.RunTurn(context.Background(), session.ID, "use installed plugin", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(working.FinalText, "story via plugin") {
+		t.Fatalf("expected plugin call to work before removal, got %+v", working)
+	}
+
+	removed, err := client.RemovePlugin(context.Background(), session.ID, "echoer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.PluginCount != 0 || removed.ToolCount != 0 {
+		t.Fatalf("expected empty plugin summary after removal, got %+v", removed)
+	}
+
+	freshSession, err := client.EnsureSession(context.Background(), "story-plugin-remove-fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	afterRemoval, _, err := client.RunTurn(context.Background(), freshSession.ID, "use installed plugin", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(afterRemoval.FinalText, "unknown tool: plugin__echoer__echo") {
+		t.Fatalf("expected removed plugin call to fail cleanly, got %+v", afterRemoval)
+	}
+}
+
 func TestUserStoryUserCanExplicitlySaveSessionAndResumeAfterDaemonRestart(t *testing.T) {
 	cfg := newTestConfig(t)
 	cfg.DaemonToken = "save-story-secret"
@@ -974,6 +1137,32 @@ func TestUserStoryUserCanExplicitlySaveSessionAndResumeAfterDaemonRestart(t *tes
 	}
 	if updated.MessageCount != 4 {
 		t.Fatalf("expected resumed session to keep old transcript and append new turn, got %+v", updated)
+	}
+}
+
+func TestUserStoryUserGetsRetryableTimeoutWhenStreamingTurnTakesTooLong(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &timeoutStoryProvider{}, nil)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-stream-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = client.StreamTurn(context.Background(), session.ID, "hang forever", 1, nil)
+	if err == nil {
+		t.Fatal("expected timed out streaming turn to fail")
+	}
+	var remoteErr *remote.Error
+	if !errors.As(err, &remoteErr) {
+		t.Fatalf("expected structured remote error, got %v", err)
+	}
+	if remoteErr.Code != "timeout" || !remoteErr.Retryable {
+		t.Fatalf("expected retryable timeout error, got %+v", remoteErr)
 	}
 }
 
@@ -1075,6 +1264,36 @@ func newIntegrationMCPHTTPServer(t *testing.T) *httptest.Server {
 	}, nil)
 
 	return httptest.NewServer(handler)
+}
+
+func TestIntegrationMCPHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_INTEGRATION_MCP_HELPER") != "1" {
+		return
+	}
+	if len(os.Args) == 0 || os.Args[len(os.Args)-1] != "mcp-echo-server" {
+		os.Exit(2)
+	}
+
+	server := sdkmcp.NewServer(&sdkmcp.Implementation{
+		Name:    "integration-stdio-helper",
+		Version: "1.0.0",
+	}, nil)
+	sdkmcp.AddTool(server, &sdkmcp.Tool{
+		Name:        "echo_text",
+		Description: "Echo text back to the caller",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, input struct {
+		Value string `json:"value" jsonschema:"value to echo back"`
+	}) (*sdkmcp.CallToolResult, map[string]string, error) {
+		_ = ctx
+		_ = req
+		return nil, map[string]string{"echo": input.Value}, nil
+	})
+
+	if err := server.Run(context.Background(), &sdkmcp.StdioTransport{}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func hasRemoteAuditEvent(events []remote.AuditEvent, action, code string) bool {
