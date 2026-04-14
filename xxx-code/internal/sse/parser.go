@@ -1,4 +1,4 @@
-package remote
+package sse
 
 import (
 	"bufio"
@@ -7,15 +7,15 @@ import (
 	"strings"
 )
 
-type sseParser struct {
+type Parser struct {
 	reader *bufio.Reader
 }
 
-func newSSEParser(reader io.Reader) *sseParser {
-	return &sseParser{reader: bufio.NewReader(reader)}
+func NewParser(reader io.Reader) *Parser {
+	return &Parser{reader: bufio.NewReader(reader)}
 }
 
-func (p *sseParser) Next() (string, []byte, error) {
+func (p *Parser) Next() (string, []byte, error) {
 	var (
 		eventName string
 		dataLines []string
@@ -38,12 +38,10 @@ func (p *sseParser) Next() (string, []byte, error) {
 			return eventName, []byte(strings.Join(dataLines, "\n")), nil
 		}
 
-		switch {
-		case strings.HasPrefix(line, "event:"):
+		if strings.HasPrefix(line, "event:") {
 			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		case strings.HasPrefix(line, "data:"):
+		} else if strings.HasPrefix(line, "data:") {
 			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-		case strings.HasPrefix(line, ":"):
 		}
 
 		if errors.Is(err, io.EOF) {

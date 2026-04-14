@@ -188,7 +188,7 @@ func (m tuiModel) View() string {
 
 	header := tuiHeaderStyle.Width(m.width).Render(fmt.Sprintf("xxx-code remote  %s  %s", m.ui.app.sessionID, m.ui.app.client.BaseURL()))
 	bodyHeight := maxInt(5, m.height-4)
-	body := m.viewport.View()
+	var body string
 	if m.showSidebar {
 		sidebarWidth := maxInt(28, minInt(38, m.width/3))
 		mainWidth := maxInt(20, m.width-sidebarWidth-1)

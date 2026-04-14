@@ -1,6 +1,9 @@
 package buildinfo
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCurrentAlwaysReturnsRuntimeMetadata(t *testing.T) {
 	info := Current()
@@ -9,5 +12,21 @@ func TestCurrentAlwaysReturnsRuntimeMetadata(t *testing.T) {
 	}
 	if info.GoVersion == "" || info.Platform == "" {
 		t.Fatalf("expected runtime metadata, got %+v", info)
+	}
+}
+
+func TestStringIncludesNormalizedBuildMetadata(t *testing.T) {
+	output := String()
+	for _, needle := range []string{
+		"xxx-code ",
+		"commit: ",
+		"built: ",
+		"built by: ",
+		"go: ",
+		"platform: ",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("expected build info string to contain %q, got %q", needle, output)
+		}
 	}
 }

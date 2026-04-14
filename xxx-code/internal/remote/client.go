@@ -18,6 +18,7 @@ import (
 	"github.com/caowenhua/x-agent/xxx-code/internal/engine"
 	mcpruntime "github.com/caowenhua/x-agent/xxx-code/internal/mcp"
 	pluginruntime "github.com/caowenhua/x-agent/xxx-code/internal/plugins"
+	"github.com/caowenhua/x-agent/xxx-code/internal/sse"
 	"github.com/caowenhua/x-agent/xxx-code/internal/tools"
 )
 
@@ -138,10 +139,6 @@ type AuditEvent struct {
 }
 
 func NewClient(baseURL, token string, httpClient *http.Client) *Client {
-	return NewClientWithTokenFile(baseURL, token, "", httpClient)
-}
-
-func NewClientWithTokenFile(baseURL, token, tokenFile string, httpClient *http.Client) *Client {
 	baseURL = strings.TrimSpace(baseURL)
 	baseURL = strings.TrimRight(baseURL, "/")
 	if httpClient == nil {
@@ -152,9 +149,14 @@ func NewClientWithTokenFile(baseURL, token, tokenFile string, httpClient *http.C
 	return &Client{
 		baseURL:    baseURL,
 		token:      strings.TrimSpace(token),
-		tokenFile:  strings.TrimSpace(tokenFile),
 		httpClient: httpClient,
 	}
+}
+
+func NewClientWithTokenFile(baseURL, token, tokenFile string, httpClient *http.Client) *Client {
+	client := NewClient(baseURL, token, httpClient)
+	client.tokenFile = strings.TrimSpace(tokenFile)
+	return client
 }
 
 func (e *Error) Error() string {
@@ -329,7 +331,7 @@ func (c *Client) StreamTurn(ctx context.Context, sessionID, prompt string, timeo
 		return TurnResult{}, SessionSummary{}, parseRemoteError(resp.StatusCode, body)
 	}
 
-	parser := newSSEParser(resp.Body)
+	parser := sse.NewParser(resp.Body)
 	for {
 		_, raw, err := parser.Next()
 		if err != nil {

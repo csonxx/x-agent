@@ -182,14 +182,6 @@ func (e *HelpError) Error() string {
 	return "help requested"
 }
 
-func Load() (Config, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return Config{}, err
-	}
-	return LoadArgs(os.Args[1:], os.LookupEnv, wd)
-}
-
 func LoadArgs(args []string, lookup func(string) (string, bool), currentWD string) (Config, error) {
 	if lookup == nil {
 		lookup = func(string) (string, bool) { return "", false }
@@ -200,7 +192,6 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 	raw := rawOptions{
 		workingDir: currentWD,
 	}
-	providerAfterFile := normalizeProviderName(cfg.Provider)
 
 	if versionMode(args) {
 		cfg.ShowVersion = true
@@ -224,7 +215,7 @@ func LoadArgs(args []string, lookup func(string) (string, bool), currentWD strin
 		cfg.ConfigFile = configPath
 		applyFileConfig(&cfg, &raw, fileCfg, filepath.Dir(configPath))
 	}
-	providerAfterFile = normalizeProviderName(cfg.Provider)
+	providerAfterFile := normalizeProviderName(cfg.Provider)
 
 	if err := applyEnvConfig(&cfg, &raw, lookup); err != nil {
 		return Config{}, err
@@ -918,15 +909,6 @@ func applyBool(target *bool, value *bool) {
 	if value != nil {
 		*target = *value
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func defaultSessionFile(workingDir, raw string) string {

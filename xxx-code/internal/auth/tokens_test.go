@@ -49,3 +49,19 @@ func TestCurrentTokensMergesFileAndStaticToken(t *testing.T) {
 		t.Fatalf("unexpected merged tokens: got=%+v want=%+v", got, want)
 	}
 }
+
+func TestCurrentTokenReturnsFirstAvailableToken(t *testing.T) {
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "tokens.txt")
+	if err := os.WriteFile(tokenFile, []byte("file-a\nfile-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CurrentToken("static", tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "file-a" {
+		t.Fatalf("unexpected current token: %q", got)
+	}
+}
