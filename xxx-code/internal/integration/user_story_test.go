@@ -31,6 +31,8 @@ type agentStoryProvider struct{}
 
 type selectiveWorkflowStoryProvider struct{}
 
+type policyHookStoryProvider struct{}
+
 func (p *toolStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 
@@ -150,6 +152,35 @@ func (p *selectiveWorkflowStoryProvider) CreateMessage(ctx context.Context, requ
 				Content: []engine.Block{
 					{Type: engine.BlockText, Text: "preparing digest"},
 					{Type: engine.BlockToolUse, ID: "toolu_story_digest", Name: "agent_fanout", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestUserText(request.Messages)),
+	}, nil
+}
+
+func (p *policyHookStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+
+	if toolResult, ok := latestToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "policy-story:"+toolResult),
+		}, nil
+	}
+
+	if latestUserText(request.Messages) == "run diagnostics" {
+		input, _ := json.Marshal(map[string]any{
+			"command": "pwd",
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "running diagnostics"},
+					{Type: engine.BlockToolUse, ID: "toolu_story_bash", Name: "bash", Input: input},
 				},
 			},
 		}, nil
@@ -594,6 +625,127 @@ func TestUserStoryOperatorCanRotateSharedTokenFileWithoutDroppingTheRemoteBridge
 	}
 }
 
+func TestUserStoryOperatorCanTraceAHookBlockedToolAcrossPolicyHooksAndAudit(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &policyHookStoryProvider{}, func(cfg *config.Config) {
+		cfg.HookBeforeTool = "echo compliance denied >&2; exit 7"
+		cfg.HookAfterTool = ""
+		cfg.HookAfterTurn = ""
+		cfg.HookAgentEvent = ""
+		cfg.HookEventFile = filepath.Join(cfg.WorkingDir, ".xxx-code", "hooks", "events.jsonl")
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-hook-audit")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := client.GetPolicy(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.BashEnabled {
+		t.Fatalf("expected bash to stay enabled so the hook, not policy, blocks the tool: %+v", policy)
+	}
+
+	hooks, err := client.GetHooks(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hooks.BeforeTool == "" || hooks.EventFile == "" {
+		t.Fatalf("expected hook config to expose the blocking script and event file, got %+v", hooks)
+	}
+
+	result, _, err := client.RunTurn(context.Background(), session.ID, "run diagnostics", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "tool blocked by before_tool hook") {
+		t.Fatalf("expected final answer to surface hook-blocked tool context, got %s", result.FinalText)
+	}
+
+	sessionAudit, err := client.ListSessionAudit(context.Background(), session.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRemoteAuditEvent(sessionAudit, "hook_error", "hook_error") {
+		t.Fatalf("expected hook_error in session audit, got %+v", sessionAudit)
+	}
+
+	globalAudit, err := client.ListAudit(context.Background(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRemoteAuditAction(globalAudit, "request", session.ID) {
+		t.Fatalf("expected global audit to include the turn request for %s, got %+v", session.ID, globalAudit)
+	}
+
+	hookEvents := readIntegrationHookEvents(t, hooks.EventFile)
+	if len(hookEvents) < 2 {
+		t.Fatalf("expected hook event file to contain before_tool and after_turn entries, got %+v", hookEvents)
+	}
+	if hookEvents[0].Kind != engine.HookBeforeTool || hookEvents[0].ToolName != "bash" {
+		t.Fatalf("expected first hook event to be before_tool for bash, got %+v", hookEvents[0])
+	}
+	last := hookEvents[len(hookEvents)-1]
+	if last.Kind != engine.HookAfterTurn || last.Status != "completed" {
+		t.Fatalf("expected after_turn completion event at the end, got %+v", last)
+	}
+}
+
+func TestUserStoryUserCanStreamAReplyAndAuditTheTurnAfterward(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &streamingEchoProvider{}, nil)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-stream-audit")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var chunks []string
+	result, updated, err := client.StreamTurn(context.Background(), session.ID, "draft my update", 0, func(event remote.TurnStreamEvent) {
+		if event.Type == string(engine.EventAssistantTextDelta) {
+			chunks = append(chunks, event.Text)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalText != "reply:draft my update" {
+		t.Fatalf("expected streamed final text, got %+v", result)
+	}
+	if strings.Join(chunks, "") != result.FinalText {
+		t.Fatalf("expected streamed chunks to reconstruct final text, got chunks=%+v result=%+v", chunks, result)
+	}
+	if updated.ID != session.ID {
+		t.Fatalf("expected updated session summary for the same session, got %+v", updated)
+	}
+
+	sessionAudit, err := client.ListSessionAudit(context.Background(), session.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRemoteAuditAction(sessionAudit, string(engine.EventAssistantTextDelta), session.ID) {
+		t.Fatalf("expected session audit to record assistant stream deltas, got %+v", sessionAudit)
+	}
+
+	globalAudit, err := client.ListAudit(context.Background(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRemoteAuditAction(globalAudit, "request", session.ID) {
+		t.Fatalf("expected global audit to include the streamed turn request, got %+v", globalAudit)
+	}
+}
+
 func writeIntegrationPluginSource(t *testing.T, rootDir, pluginName, script string) string {
 	t.Helper()
 	pluginDir := filepath.Join(rootDir, pluginName)
@@ -640,4 +792,48 @@ func newIntegrationMCPHTTPServer(t *testing.T) *httptest.Server {
 	}, nil)
 
 	return httptest.NewServer(handler)
+}
+
+func hasRemoteAuditEvent(events []remote.AuditEvent, action, code string) bool {
+	for _, event := range events {
+		if event.Action == action && event.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRemoteAuditAction(events []remote.AuditEvent, action, sessionID string) bool {
+	for _, event := range events {
+		if event.Action != action {
+			continue
+		}
+		if sessionID == "" || event.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func readIntegrationHookEvents(t *testing.T, path string) []engine.HookEvent {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []engine.HookEvent
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event engine.HookEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("parse hook event line %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
 }
