@@ -746,6 +746,83 @@ func TestUserStoryUserCanStreamAReplyAndAuditTheTurnAfterward(t *testing.T) {
 	}
 }
 
+func TestUserStoryOperatorCanRestrictDaemonAccessBySessionPrefixAndMode(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &toolStoryProvider{}, func(cfg *config.Config) {
+		cfg.DaemonAllowModes = []string{"sessions_read", "sessions_write"}
+		cfg.DaemonAllowSessionPrefixes = []string{"team-"}
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+
+	_, err := client.EnsureSession(context.Background(), "other-team-story")
+	if err == nil {
+		t.Fatal("expected non-matching session prefix to be rejected")
+	}
+	var remoteErr *remote.Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != http.StatusForbidden || remoteErr.Code != "forbidden" {
+		t.Fatalf("expected forbidden prefix rejection, got %v", err)
+	}
+
+	session, err := client.EnsureSession(context.Background(), "team-story")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = client.RunTurn(context.Background(), session.ID, "blocked by mode", 0)
+	if err == nil {
+		t.Fatal("expected turns mode to be rejected by daemon ACL")
+	}
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != http.StatusForbidden || remoteErr.Code != "forbidden" {
+		t.Fatalf("expected forbidden turns rejection, got %v", err)
+	}
+
+	auditEvents := readIntegrationDaemonAuditEvents(t, filepath.Join(cfg.DaemonDir, "audit.jsonl"))
+	if !hasDaemonAuditEvent(auditEvents, "acl", "forbidden", "other-team-story") {
+		t.Fatalf("expected audit log to capture blocked session prefix, got %+v", auditEvents)
+	}
+	if !hasDaemonAuditEvent(auditEvents, "acl", "forbidden", "team-story") {
+		t.Fatalf("expected audit log to capture blocked turns mode, got %+v", auditEvents)
+	}
+}
+
+func TestUserStoryOperatorCanReturnStructuredBackoffWhenClientsHitRateLimits(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &toolStoryProvider{}, func(cfg *config.Config) {
+		cfg.DaemonRateLimitPerMinute = 1
+		cfg.DaemonRateLimitBurst = 1
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+
+	if _, err := client.ListSessions(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := client.ListSessions(context.Background())
+	if err == nil {
+		t.Fatal("expected second burst request to be rate limited")
+	}
+	var remoteErr *remote.Error
+	if !errors.As(err, &remoteErr) {
+		t.Fatalf("expected structured remote error, got %v", err)
+	}
+	if remoteErr.StatusCode != http.StatusTooManyRequests || remoteErr.Code != "rate_limited" || !remoteErr.Retryable {
+		t.Fatalf("expected retryable 429 response, got %+v", remoteErr)
+	}
+
+	auditEvents := readIntegrationDaemonAuditEvents(t, filepath.Join(cfg.DaemonDir, "audit.jsonl"))
+	if !hasDaemonRateLimitEvent(auditEvents) {
+		t.Fatalf("expected audit log to capture rate limit denial with retry metadata, got %+v", auditEvents)
+	}
+}
+
 func writeIntegrationPluginSource(t *testing.T, rootDir, pluginName, script string) string {
 	t.Helper()
 	pluginDir := filepath.Join(rootDir, pluginName)
@@ -836,4 +913,45 @@ func readIntegrationHookEvents(t *testing.T, path string) []engine.HookEvent {
 		events = append(events, event)
 	}
 	return events
+}
+
+func readIntegrationDaemonAuditEvents(t *testing.T, path string) []daemon.AuditEvent {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []daemon.AuditEvent
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event daemon.AuditEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("parse daemon audit line %q: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func hasDaemonAuditEvent(events []daemon.AuditEvent, action, code, sessionID string) bool {
+	for _, event := range events {
+		if event.Action == action && event.Code == code && event.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDaemonRateLimitEvent(events []daemon.AuditEvent) bool {
+	for _, event := range events {
+		if event.Action == "rate_limit" && event.Code == "rate_limited" && event.RetryAfterSeconds > 0 {
+			return true
+		}
+	}
+	return false
 }
