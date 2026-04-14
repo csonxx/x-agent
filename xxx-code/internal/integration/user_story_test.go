@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,10 @@ type toolStoryProvider struct{}
 type workflowFailureStoryProvider struct{}
 
 type workflowSuccessStoryProvider struct{}
+
+type agentStoryProvider struct{}
+
+type selectiveWorkflowStoryProvider struct{}
 
 func (p *toolStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
@@ -71,6 +76,88 @@ func (p *workflowFailureStoryProvider) CreateMessage(ctx context.Context, reques
 
 func (p *workflowSuccessStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	return workflowStoryResponse(ctx, request, false)
+}
+
+func (p *agentStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	if toolResult, ok := latestToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "agent-story:"+toolResult),
+		}, nil
+	}
+
+	switch latestUserText(request.Messages) {
+	case "delegate analyst":
+		input, _ := json.Marshal(map[string]any{
+			"name":       "analyst",
+			"prompt":     "child task",
+			"background": false,
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "delegating analyst"},
+					{Type: engine.BlockToolUse, ID: "toolu_story_delegate", Name: "agent_spawn", Input: input},
+				},
+			},
+		}, nil
+	case "start background watcher":
+		input, _ := json.Marshal(map[string]any{
+			"name":       "watcher",
+			"prompt":     "block child",
+			"background": true,
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "starting watcher"},
+					{Type: engine.BlockToolUse, ID: "toolu_story_background", Name: "agent_spawn", Input: input},
+				},
+			},
+		}, nil
+	case "block child":
+		<-ctx.Done()
+		return engine.CompletionResponse{}, ctx.Err()
+	default:
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestUserText(request.Messages)),
+		}, nil
+	}
+}
+
+func (p *selectiveWorkflowStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+
+	if toolResult, ok := latestToolResult(request.Messages); ok {
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, "workflow-story:"+toolResult),
+		}, nil
+	}
+
+	if latestUserText(request.Messages) == "prepare daily digest" {
+		input, _ := json.Marshal(map[string]any{
+			"wait":         true,
+			"max_parallel": 1,
+			"tasks": []map[string]any{
+				{"name": "research", "prompt": "collect report facts"},
+				{"name": "draft", "prompt": "draft summary block"},
+			},
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "preparing digest"},
+					{Type: engine.BlockToolUse, ID: "toolu_story_digest", Name: "agent_fanout", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	return engine.CompletionResponse{
+		Message: engine.NewTextMessage(engine.RoleAssistant, "reply:"+latestUserText(request.Messages)),
+	}, nil
 }
 
 func workflowStoryResponse(ctx context.Context, request engine.CompletionRequest, failChild bool) (engine.CompletionResponse, error) {
@@ -292,6 +379,218 @@ func TestUserStoryUserCanResumeFailedWorkflowAfterDaemonRestart(t *testing.T) {
 	}
 	if byName["collect"].Status != string(engine.AgentIdle) || byName["summarize"].Status != string(engine.AgentIdle) {
 		t.Fatalf("expected recovered workflow tasks to finish idle, got %+v", byName)
+	}
+}
+
+func TestUserStoryUserCanTrackDelegatedAgentsAcrossForegroundAndBackgroundWork(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &agentStoryProvider{}, nil)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+
+	foregroundSession, err := client.EnsureSession(context.Background(), "story-agent-foreground")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, updated, err := client.RunTurn(context.Background(), foregroundSession.ID, "delegate analyst", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "reply:child task") {
+		t.Fatalf("expected delegated child result in final answer, got %s", result.FinalText)
+	}
+	if updated.AgentCount != 1 {
+		t.Fatalf("expected one tracked foreground agent, got %+v", updated)
+	}
+
+	agents, err := client.ListAgents(context.Background(), foregroundSession.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected one foreground agent, got %+v", agents)
+	}
+
+	waited, err := client.WaitAgent(context.Background(), foregroundSession.ID, agents[0].ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waited.Status != engine.AgentIdle {
+		t.Fatalf("expected delegated analyst to be idle after completion, got %+v", waited)
+	}
+
+	sent, err := client.SendAgent(context.Background(), foregroundSession.ID, agents[0].ID, "follow-up", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.Status != engine.AgentIdle || sent.Result != "reply:follow-up" {
+		t.Fatalf("expected delegated analyst to handle follow-up, got %+v", sent)
+	}
+
+	backgroundSession, err := client.EnsureSession(context.Background(), "story-agent-background")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := client.RunTurn(context.Background(), backgroundSession.ID, "start background watcher", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	backgroundAgents, err := client.ListAgents(context.Background(), backgroundSession.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backgroundAgents) < 1 {
+		t.Fatalf("expected a tracked background agent, got %+v", backgroundAgents)
+	}
+
+	var backgroundID string
+	for _, agent := range backgroundAgents {
+		if agent.Name == "watcher" || agent.Prompt == "block child" {
+			backgroundID = agent.ID
+			break
+		}
+	}
+	if backgroundID == "" {
+		t.Fatalf("expected watcher agent in %+v", backgroundAgents)
+	}
+
+	cancelled, err := client.CancelAgent(context.Background(), backgroundSession.ID, backgroundID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != engine.AgentCancelled {
+		t.Fatalf("expected watcher to cancel cleanly, got %+v", cancelled)
+	}
+}
+
+func TestUserStoryUserCanRerunOneWorkflowTaskWithoutRepeatingEverything(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &selectiveWorkflowStoryProvider{}, nil)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-workflow-selective")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, updated, err := client.RunTurn(context.Background(), session.ID, "prepare daily digest", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "reply:collect report facts") || !strings.Contains(result.FinalText, "reply:draft summary block") {
+		t.Fatalf("expected initial digest workflow to include both task outputs, got %s", result.FinalText)
+	}
+	if updated.WorkflowCount != 1 {
+		t.Fatalf("expected one persisted workflow, got %+v", updated)
+	}
+
+	workflows, err := client.ListWorkflows(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("expected one workflow snapshot, got %+v", workflows)
+	}
+
+	tasks, err := client.ListWorkflowTasks(context.Background(), session.ID, workflows[0].ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected two workflow tasks, got %+v", tasks)
+	}
+
+	resumed, err := client.ResumeWorkflow(context.Background(), session.ID, workflows[0].ID, remote.WorkflowResumeOptions{
+		TaskNames: []string{"research"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Workflow.Status != tools.WorkflowCompleted {
+		t.Fatalf("expected workflow to remain completed after selective rerun, got %+v", resumed.Workflow)
+	}
+
+	byName := map[string]tools.FanoutTaskResultAlias{}
+	for _, task := range resumed.Tasks {
+		byName[task.Name] = task
+	}
+	if byName["research"].Attempts != 2 {
+		t.Fatalf("expected selected task to rerun exactly once, got %+v", byName["research"])
+	}
+	if byName["draft"].Attempts != 1 {
+		t.Fatalf("expected unselected task to keep its original attempt count, got %+v", byName["draft"])
+	}
+}
+
+func TestUserStoryOperatorCanRotateSharedTokenFileWithoutDroppingTheRemoteBridge(t *testing.T) {
+	cfg := newTestConfig(t)
+	tokenFile := filepath.Join(t.TempDir(), "shared-token.txt")
+	if err := os.WriteFile(tokenFile, []byte("token-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.DaemonTokenFile = tokenFile
+
+	server := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &toolStoryProvider{}
+	})
+	httpServer := httptest.NewServer(server.Handler())
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClientWithTokenFile(httpServer.URL, "", tokenFile, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-token-rotation")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, _, err := client.RunTurn(context.Background(), session.ID, "before rotation", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FinalText != "reply:before rotation" {
+		t.Fatalf("expected first remote turn to succeed before rotation, got %+v", first)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte(`["token-b","token-a"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	middle, _, err := client.RunTurn(context.Background(), session.ID, "during rotation", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if middle.FinalText != "reply:during rotation" {
+		t.Fatalf("expected remote bridge to survive dual-token rotation, got %+v", middle)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte("token-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	last, _, err := client.RunTurn(context.Background(), session.ID, "after rotation", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last.FinalText != "reply:after rotation" {
+		t.Fatalf("expected remote bridge to keep working after cutover, got %+v", last)
+	}
+
+	staleClient := remote.NewClient(httpServer.URL, "token-a", httpServer.Client())
+	_, err = staleClient.ListSessions(context.Background())
+	if err == nil {
+		t.Fatal("expected stale token to be rejected after cutover")
+	}
+	var remoteErr *remote.Error
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected stale token to fail with 401, got %v", err)
 	}
 }
 
