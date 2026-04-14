@@ -331,6 +331,83 @@ func TestUserStoryOperatorCanReloadMCPAndUseItInATurn(t *testing.T) {
 	}
 }
 
+func TestUserStoryOperatorCanInspectMCPResourcesTemplatesAndPrompts(t *testing.T) {
+	server, httpServer, cfg := newDaemonHarness(t, &toolStoryProvider{}, nil)
+
+	mcpServer := newIntegrationMCPHTTPServer(t)
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+		mcpServer.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-mcp-catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	configJSON := fmt.Sprintf(`{
+  "mcpServers": {
+    "tester": {
+      "transport": "http",
+      "url": %q
+    }
+  }
+}`, mcpServer.URL)
+	if err := os.WriteFile(filepath.Join(cfg.WorkingDir, ".mcp.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := client.ReloadMCP(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ServerCount != 1 || summary.ToolCount != 1 {
+		t.Fatalf("expected loaded MCP summary, got %+v", summary)
+	}
+
+	resources, err := client.ListMCPResources(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 1 || resources[0].URI != "file:///a" {
+		t.Fatalf("expected one MCP resource, got %+v", resources)
+	}
+
+	templates, err := client.ListMCPResourceTemplates(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(templates) != 1 || templates[0].URITemplate != "file:///dir/{f}" {
+		t.Fatalf("expected one MCP resource template, got %+v", templates)
+	}
+
+	prompts, err := client.ListMCPPrompts(context.Background(), session.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 1 || prompts[0].Name != "greet" {
+		t.Fatalf("expected one MCP prompt, got %+v", prompts)
+	}
+
+	resource, err := client.ReadMCPResource(context.Background(), session.ID, "tester", "file:///a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.Contents) != 1 || resource.Contents[0].Text != "alpha" {
+		t.Fatalf("expected MCP resource contents, got %+v", resource)
+	}
+
+	prompt, err := client.GetMCPPrompt(context.Background(), session.ID, "tester", "greet", map[string]string{"name": "Pat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt.Messages) != 1 || !strings.Contains(prompt.Messages[0].Content, "Say hi to Pat") {
+		t.Fatalf("expected MCP prompt details to include caller argument, got %+v", prompt)
+	}
+}
+
 func TestUserStoryUserCanResumeFailedWorkflowAfterDaemonRestart(t *testing.T) {
 	// Given a workflow that failed mid-run and was persisted by the daemon.
 	cfg := newTestConfig(t)
@@ -823,6 +900,83 @@ func TestUserStoryOperatorCanReturnStructuredBackoffWhenClientsHitRateLimits(t *
 	}
 }
 
+func TestUserStoryUserCanExplicitlySaveSessionAndResumeAfterDaemonRestart(t *testing.T) {
+	cfg := newTestConfig(t)
+	cfg.DaemonToken = "save-story-secret"
+
+	serverA := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &toolStoryProvider{}
+	})
+	httpA := httptest.NewServer(serverA.Handler())
+
+	clientA := remote.NewClient(httpA.URL, cfg.DaemonToken, httpA.Client())
+	session, err := clientA.EnsureSession(context.Background(), "story-save-resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, _, err := clientA.RunTurn(context.Background(), session.ID, "remember this context", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FinalText != "reply:remember this context" {
+		t.Fatalf("expected first turn reply before save, got %+v", first)
+	}
+
+	saved, err := clientA.SaveSession(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.SessionFile == "" {
+		t.Fatalf("expected explicit save to return a session file, got %+v", saved)
+	}
+	if _, err := os.Stat(saved.SessionFile); err != nil {
+		t.Fatalf("expected saved session file to exist, got %v", err)
+	}
+
+	httpA.Close()
+	if err := serverA.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	serverB := daemon.New(cfg, io.Discard, io.Discard, func(config.Config) engine.Provider {
+		return &toolStoryProvider{}
+	})
+	httpB := httptest.NewServer(serverB.Handler())
+	defer func() {
+		httpB.Close()
+		_ = serverB.Close()
+	}()
+
+	clientB := remote.NewClient(httpB.URL, cfg.DaemonToken, httpB.Client())
+	reloaded, err := clientB.GetSession(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.MessageCount != 2 {
+		t.Fatalf("expected saved session summary after restart, got %+v", reloaded)
+	}
+
+	messages, err := clientB.ListMessages(context.Background(), session.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected saved transcript to reload after restart, got %+v", messages)
+	}
+
+	second, updated, err := clientB.RunTurn(context.Background(), session.ID, "continue from saved session", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.FinalText != "reply:continue from saved session" {
+		t.Fatalf("expected continued reply after resume, got %+v", second)
+	}
+	if updated.MessageCount != 4 {
+		t.Fatalf("expected resumed session to keep old transcript and append new turn, got %+v", updated)
+	}
+}
+
 func writeIntegrationPluginSource(t *testing.T, rootDir, pluginName, script string) string {
 	t.Helper()
 	pluginDir := filepath.Join(rootDir, pluginName)
@@ -855,6 +1009,58 @@ func newIntegrationMCPHTTPServer(t *testing.T) *httptest.Server {
 			Name:    "integration-test-mcp",
 			Version: "1.0.0",
 		}, nil)
+		server.AddResource(&sdkmcp.Resource{
+			Name:        "alpha",
+			Description: "Alpha resource",
+			URI:         "file:///a",
+		}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+			_ = ctx
+			if req.Params.URI != "file:///a" {
+				return nil, sdkmcp.ResourceNotFoundError(req.Params.URI)
+			}
+			return &sdkmcp.ReadResourceResult{
+				Contents: []*sdkmcp.ResourceContents{{
+					URI:  "file:///a",
+					Text: "alpha",
+				}},
+			}, nil
+		})
+		server.AddResourceTemplate(&sdkmcp.ResourceTemplate{
+			Name:        "dir",
+			Description: "Directory template",
+			URITemplate: "file:///dir/{f}",
+		}, func(ctx context.Context, req *sdkmcp.ReadResourceRequest) (*sdkmcp.ReadResourceResult, error) {
+			_ = ctx
+			uri := req.Params.URI
+			if !strings.HasPrefix(uri, "file:///dir/") {
+				return nil, sdkmcp.ResourceNotFoundError(uri)
+			}
+			return &sdkmcp.ReadResourceResult{
+				Contents: []*sdkmcp.ResourceContents{{
+					URI:  uri,
+					Text: strings.TrimPrefix(uri, "file:///dir/"),
+				}},
+			}, nil
+		})
+		server.AddPrompt(&sdkmcp.Prompt{
+			Name:        "greet",
+			Description: "Greeting prompt",
+			Arguments: []*sdkmcp.PromptArgument{{
+				Name:        "name",
+				Description: "Name to greet",
+				Required:    true,
+			}},
+		}, func(ctx context.Context, req *sdkmcp.GetPromptRequest) (*sdkmcp.GetPromptResult, error) {
+			_ = ctx
+			name := req.Params.Arguments["name"]
+			return &sdkmcp.GetPromptResult{
+				Description: "Greeting prompt",
+				Messages: []*sdkmcp.PromptMessage{{
+					Role:    "user",
+					Content: &sdkmcp.TextContent{Text: "Say hi to " + name},
+				}},
+			}, nil
+		})
 		sdkmcp.AddTool(server, &sdkmcp.Tool{
 			Name:        "echo_text",
 			Description: "Echo text back to the caller",
