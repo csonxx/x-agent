@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -123,5 +124,48 @@ func TestRemoteTUIModelConsumeEventsAndSidebar(t *testing.T) {
 	}
 	if view := model.View(); !strings.Contains(view, "xxx-code remote") {
 		t.Fatalf("unexpected view: %q", view)
+	}
+}
+
+func TestRemoteTUIModelShowsTurnAndSaveErrors(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	app := &App{
+		config:    config.Config{RemoteURL: client.BaseURL()},
+		client:    client,
+		out:       &bytes.Buffer{},
+		errOut:    &bytes.Buffer{},
+		sessionID: "session-error",
+	}
+	ui := &terminalUI{app: app, ctx: context.Background()}
+	model := newTUIModel(ui)
+	model.width = 90
+	model.height = 24
+	model.ready = true
+	model.layout()
+
+	updated, _ := model.Update(tuiTurnDoneMsg{
+		session: SessionSummary{ID: "session-error"},
+		err:     errors.New("turn exploded"),
+	})
+	model = updated.(tuiModel)
+	if model.status != "turn failed" {
+		t.Fatalf("expected turn failure status, got %q", model.status)
+	}
+	if joined := strings.Join(model.lines, "\n"); !strings.Contains(joined, "error  turn exploded") {
+		t.Fatalf("expected turn failure transcript, got %q", joined)
+	}
+
+	updated, _ = model.Update(tuiSaveDoneMsg{
+		session: SessionSummary{ID: "session-error"},
+		err:     errors.New("save exploded"),
+	})
+	model = updated.(tuiModel)
+	if model.status != "save failed" {
+		t.Fatalf("expected save failure status, got %q", model.status)
+	}
+	if joined := strings.Join(model.lines, "\n"); !strings.Contains(joined, "error  save exploded") {
+		t.Fatalf("expected save failure transcript, got %q", joined)
 	}
 }
