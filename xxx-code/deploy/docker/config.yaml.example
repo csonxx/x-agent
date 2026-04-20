@@ -1,0 +1,27 @@
+# Copy this file to config.yaml before running docker compose.
+provider: anthropic
+model: claude-sonnet-4-5
+cwd: /workspace
+session_file: /var/lib/xxx-code/session.json
+daemon_dir: /var/lib/xxx-code/daemon
+daemon_token_file: /etc/xxx-code/secrets/daemon-token.txt
+daemon_audit_file: /var/log/xxx-code/audit.jsonl
+daemon_rate_limit_per_minute: 120
+daemon_rate_limit_burst: 20
+daemon_allow_modes:
+  - sessions_read
+  - sessions_write
+  - turns
+  - introspection
+  - plugins
+  - mcp
+  - agents
+  - workflows
+  - audit
+  - save
+allow_read:
+  - /workspace
+allow_write:
+  - /workspace
+stream: true
+log_level: info

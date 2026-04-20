@@ -1193,6 +1193,9 @@ go run ./cmd/xxx-code --version
 - [ROADMAP.md](./ROADMAP.md)
 - [docs/daemon-deployment.md](./docs/daemon-deployment.md)
 - [docs/stability-soak.md](./docs/stability-soak.md)
+- [deploy/systemd/xxx-code.service](./deploy/systemd/xxx-code.service)
+- [deploy/launchd/io.github.csonxx.xxx-code-daemon.plist](./deploy/launchd/io.github.csonxx.xxx-code-daemon.plist)
+- [deploy/docker/compose.yaml](./deploy/docker/compose.yaml)
 - [examples/config.yaml](./examples/config.yaml)
 - [examples/.env.example](./examples/.env.example)
 

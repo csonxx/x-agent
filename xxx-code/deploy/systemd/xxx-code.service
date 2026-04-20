@@ -1,0 +1,31 @@
+[Unit]
+Description=xxx-code daemon
+Documentation=https://github.com/csonxx/x-agent/tree/main/xxx-code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xxx-code
+Group=xxx-code
+WorkingDirectory=/var/lib/xxx-code
+Environment=HOME=/var/lib/xxx-code
+EnvironmentFile=-/etc/default/xxx-code
+ExecStart=/usr/local/bin/xxx-code --daemon --config /etc/xxx-code/config.yaml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/xxx-code /var/log/xxx-code
+StateDirectory=xxx-code
+LogsDirectory=xxx-code
+RuntimeDirectory=xxx-code
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

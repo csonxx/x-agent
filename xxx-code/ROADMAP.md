@@ -117,15 +117,15 @@
 
 ## P1 运维与交付
 
-- [ ] 补 daemon 服务化模板
+- [x] 补 daemon 服务化模板
   - 目标：让 daemon 更容易正式部署
-  - 产出：`systemd`、`launchd`、Docker 示例
-- [ ] 补 nightly soak / 长稳流水线
+  - 已补 `systemd`、`launchd`、Docker 模板与部署文档
+- [x] 补 nightly soak / 长稳流水线
   - 目标：把当前的 soak 能力升级成定时回归，而不是只靠手工触发
-  - 产出：定时 workflow、summary artifact、失败保留现场策略
-- [ ] 补 provider 实网 smoke
+  - 已补定时 workflow 与 summary artifact 上传
+- [x] 补 provider 实网 smoke
   - 目标：在有密钥时做最小真实 API 回归
-  - 产出：带环境变量门控的 provider smoke matrix
+  - 已补带环境变量门控的 provider smoke workflow 与统一 smoke 脚本
 
 ## P1 可观测性
 
@@ -162,9 +162,8 @@
 
 当前默认推进顺序：
 
-1. 进入 P1 运维与交付
-2. 再推进 P1 可观测性
-3. 最后整理 P2 开发者生态
+1. 进入 P1 可观测性
+2. 最后整理 P2 开发者生态
 
 ## 阶段完成标准
 

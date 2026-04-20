@@ -1,0 +1,6 @@
+.git
+dist
+claude-code
+**/.artifacts
+**/bin
+**/.DS_Store

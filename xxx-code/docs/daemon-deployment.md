@@ -1,5 +1,25 @@
 # xxx-code Daemon Deployment
 
+## 现成模板
+
+仓库里现在直接提供了几套可以拿来改的部署模板：
+
+- `deploy/systemd/xxx-code.service`
+- `deploy/launchd/io.github.csonxx.xxx-code-daemon.plist`
+- `deploy/docker/Dockerfile`
+- `deploy/docker/compose.yaml`
+- `deploy/docker/config.yaml.example`
+
+推荐做法不是原样照搬，而是把里面的：
+
+- 二进制路径
+- 配置路径
+- 工作目录
+- token file 路径
+- 日志路径
+
+改成你自己机器或环境的实际布局。
+
 ## 最小暴露面
 
 - 默认继续监听 `127.0.0.1:7331`
@@ -108,3 +128,91 @@ go run ./cmd/xxx-code \
   --daemon-rate-limit-per-minute 120 \
   --daemon-rate-limit-burst 20
 ```
+
+## systemd 模板
+
+Linux 主机上，最推荐的方式通常是：
+
+1. 把二进制放到 `/usr/local/bin/xxx-code`
+2. 把配置放到 `/etc/xxx-code/config.yaml`
+3. 把 token file 放到 `/etc/xxx-code/secrets/daemon-token.txt`
+4. 把运行状态放到 `/var/lib/xxx-code`
+5. 把日志放到 `/var/log/xxx-code`
+
+模板文件：
+
+- `deploy/systemd/xxx-code.service`
+
+典型步骤：
+
+```bash
+sudo useradd --system --home /var/lib/xxx-code --shell /usr/sbin/nologin xxx-code
+sudo mkdir -p /etc/xxx-code /etc/xxx-code/secrets /var/lib/xxx-code /var/log/xxx-code
+sudo install -m 0755 ./bin/xxx-code /usr/local/bin/xxx-code
+sudo install -m 0644 ./deploy/systemd/xxx-code.service /etc/systemd/system/xxx-code.service
+sudo install -m 0600 ./.secrets/daemon-token.txt /etc/xxx-code/secrets/daemon-token.txt
+sudo install -m 0644 ./examples/config.yaml /etc/xxx-code/config.yaml
+sudo chown -R xxx-code:xxx-code /var/lib/xxx-code /var/log/xxx-code
+sudo systemctl daemon-reload
+sudo systemctl enable --now xxx-code
+```
+
+常用命令：
+
+```bash
+sudo systemctl status xxx-code
+sudo journalctl -u xxx-code -f
+```
+
+## launchd 模板
+
+macOS 上可以用 `launchd` 托管 daemon。
+
+模板文件：
+
+- `deploy/launchd/io.github.csonxx.xxx-code-daemon.plist`
+
+典型步骤：
+
+```bash
+mkdir -p /usr/local/etc/xxx-code /usr/local/etc/xxx-code/secrets /usr/local/var/lib/xxx-code /usr/local/var/log/xxx-code
+install -m 0755 ./bin/xxx-code /usr/local/bin/xxx-code
+install -m 0644 ./deploy/launchd/io.github.csonxx.xxx-code-daemon.plist ~/Library/LaunchAgents/io.github.csonxx.xxx-code-daemon.plist
+install -m 0600 ./.secrets/daemon-token.txt /usr/local/etc/xxx-code/secrets/daemon-token.txt
+install -m 0644 ./examples/config.yaml /usr/local/etc/xxx-code/config.yaml
+launchctl unload ~/Library/LaunchAgents/io.github.csonxx.xxx-code-daemon.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/io.github.csonxx.xxx-code-daemon.plist
+launchctl start io.github.csonxx.xxx-code-daemon
+```
+
+查看状态：
+
+```bash
+launchctl print gui/$(id -u)/io.github.csonxx.xxx-code-daemon
+```
+
+## Docker 模板
+
+如果你希望把 daemon 跑在容器里，仓库里也提供了一套最小模板：
+
+- `deploy/docker/Dockerfile`
+- `deploy/docker/compose.yaml`
+- `deploy/docker/config.yaml.example`
+
+典型步骤：
+
+```bash
+cd deploy/docker
+cp config.yaml.example config.yaml
+mkdir -p secrets
+printf 'replace-me\n' > secrets/daemon-token.txt
+docker compose up --build -d
+```
+
+默认 compose 模板会：
+
+- 将仓库根目录挂到容器内的 `/workspace`
+- 把 daemon 端口暴露到 `127.0.0.1:7331`
+- 把状态目录和日志目录做成 named volume
+
+如果你的目标不是操作当前仓库，而是操作另一份代码，请把 compose 里的 workspace volume 改成你自己的目标目录。

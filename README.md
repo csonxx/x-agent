@@ -105,6 +105,7 @@ x-agent/
     README.md                xxx-code 完整功能与架构说明
     ROADMAP.md               xxx-code 路线图
     docs/                    补充部署文档
+    deploy/                  systemd / launchd / Docker 部署模板
     examples/                YAML 配置模板与 .env 示例
     cmd/xxx-code/            程序入口
     cmd/xxx-code-stability/  长稳/soak 测试入口

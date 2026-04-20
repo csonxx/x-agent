@@ -1,0 +1,131 @@
+name: xxx-code Provider Smoke
+
+on:
+  schedule:
+    - cron: "30 19 * * 0"
+  workflow_dispatch:
+
+jobs:
+  anthropic:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+      - name: Skip when Anthropic key is missing
+        if: ${{ secrets.ANTHROPIC_API_KEY == '' }}
+        run: echo "Skipping anthropic provider smoke because ANTHROPIC_API_KEY is not configured."
+      - name: Run Anthropic smoke
+        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash ./scripts/provider-smoke.sh anthropic claude-sonnet-4-5
+
+  openai:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+      - name: Skip when OpenAI key is missing
+        if: ${{ secrets.OPENAI_API_KEY == '' }}
+        run: echo "Skipping openai provider smoke because OPENAI_API_KEY is not configured."
+      - name: Run OpenAI smoke
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: bash ./scripts/provider-smoke.sh openai gpt-4.1
+
+  azure_openai:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+      - name: Skip when Azure OpenAI settings are missing
+        if: ${{ secrets.AZURE_OPENAI_API_KEY == '' || secrets.AZURE_OPENAI_BASE_URL == '' || vars.AZURE_OPENAI_MODEL == '' }}
+        run: echo "Skipping azure-openai provider smoke because AZURE_OPENAI_API_KEY, AZURE_OPENAI_BASE_URL, or AZURE_OPENAI_MODEL is not configured."
+      - name: Run Azure OpenAI smoke
+        if: ${{ secrets.AZURE_OPENAI_API_KEY != '' && secrets.AZURE_OPENAI_BASE_URL != '' && vars.AZURE_OPENAI_MODEL != '' }}
+        env:
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_BASE_URL: ${{ secrets.AZURE_OPENAI_BASE_URL }}
+        run: bash ./scripts/provider-smoke.sh azure-openai "${{ vars.AZURE_OPENAI_MODEL }}"
+
+  gemini:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+      - name: Skip when Gemini key is missing
+        if: ${{ secrets.GEMINI_API_KEY == '' }}
+        run: echo "Skipping gemini provider smoke because GEMINI_API_KEY is not configured."
+      - name: Run Gemini smoke
+        if: ${{ secrets.GEMINI_API_KEY != '' }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: bash ./scripts/provider-smoke.sh gemini gemini-2.5-pro
+
+  minimax:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+      - name: Skip when MiniMax key is missing
+        if: ${{ secrets.MINIMAX_API_KEY == '' }}
+        run: echo "Skipping minimax provider smoke because MINIMAX_API_KEY is not configured."
+      - name: Run MiniMax smoke
+        if: ${{ secrets.MINIMAX_API_KEY != '' }}
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: bash ./scripts/provider-smoke.sh minimax MiniMax-M2.5
+
+  glm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+      - name: Skip when GLM key is missing
+        if: ${{ secrets.GLM_API_KEY == '' && secrets.ZHIPUAI_API_KEY == '' && secrets.BIGMODEL_API_KEY == '' && secrets.ZAI_API_KEY == '' }}
+        run: echo "Skipping glm provider smoke because no GLM-compatible API key is configured."
+      - name: Run GLM smoke
+        if: ${{ secrets.GLM_API_KEY != '' || secrets.ZHIPUAI_API_KEY != '' || secrets.BIGMODEL_API_KEY != '' || secrets.ZAI_API_KEY != '' }}
+        env:
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          ZHIPUAI_API_KEY: ${{ secrets.ZHIPUAI_API_KEY }}
+          BIGMODEL_API_KEY: ${{ secrets.BIGMODEL_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+        run: bash ./scripts/provider-smoke.sh glm glm-4.5

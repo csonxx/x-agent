@@ -1,0 +1,59 @@
+name: xxx-code Nightly Soak
+
+on:
+  schedule:
+    - cron: "15 18 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Soak duration, for example 20m
+        required: false
+        default: 20m
+      concurrency:
+        description: Parallel worker count
+        required: false
+        default: "2"
+      restart_every:
+        description: Restart daemon every N rounds
+        required: false
+        default: "5"
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: xxx-code
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: xxx-code/go.mod
+          cache-dependency-path: xxx-code/go.sum
+
+      - name: Run nightly soak
+        env:
+          SOAK_DURATION: ${{ github.event.inputs.duration || '20m' }}
+          SOAK_CONCURRENCY: ${{ github.event.inputs.concurrency || '2' }}
+          SOAK_RESTART_EVERY: ${{ github.event.inputs.restart_every || '5' }}
+        run: |
+          mkdir -p .artifacts/nightly-soak
+          go run ./cmd/xxx-code-stability \
+            --duration "${SOAK_DURATION}" \
+            --concurrency "${SOAK_CONCURRENCY}" \
+            --restart-every "${SOAK_RESTART_EVERY}" \
+            --progress-every 30s \
+            --summary-json .artifacts/nightly-soak/summary.json | tee .artifacts/nightly-soak/run.log
+
+      - name: Upload nightly soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xxx-code-nightly-soak
+          path: xxx-code/.artifacts/nightly-soak
+          if-no-files-found: warn
+          retention-days: 14

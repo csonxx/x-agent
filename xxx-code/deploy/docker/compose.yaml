@@ -1,0 +1,22 @@
+services:
+  xxx-code-daemon:
+    build:
+      context: ../../..
+      dockerfile: xxx-code/deploy/docker/Dockerfile
+    command:
+      - --daemon
+      - --config
+      - /etc/xxx-code/config.yaml
+    ports:
+      - "127.0.0.1:7331:7331"
+    volumes:
+      - ../../../:/workspace
+      - ./config.yaml:/etc/xxx-code/config.yaml:ro
+      - ./secrets:/etc/xxx-code/secrets:ro
+      - xxx-code-daemon-state:/var/lib/xxx-code
+      - xxx-code-daemon-logs:/var/log/xxx-code
+    restart: unless-stopped
+
+volumes:
+  xxx-code-daemon-state:
+  xxx-code-daemon-logs:
