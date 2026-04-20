@@ -638,6 +638,7 @@ your-project/
 - [examples/demo-workspace/README.md](./examples/demo-workspace/README.md)
 - [examples/demo-workspace/config.yaml](./examples/demo-workspace/config.yaml)
 - [examples/demo-workspace/demo-prompts.md](./examples/demo-workspace/demo-prompts.md)
+- [scripts/demo-workspace-smoke.sh](./scripts/demo-workspace-smoke.sh)
 
 ### 可运行示例工程
 
@@ -662,6 +663,14 @@ go run ./cmd/xxx-code --config ./examples/demo-workspace/config.yaml
 - [examples/demo-workspace/README.md](./examples/demo-workspace/README.md)
 - [examples/demo-workspace/brief.md](./examples/demo-workspace/brief.md)
 - [examples/demo-workspace/demo-prompts.md](./examples/demo-workspace/demo-prompts.md)
+
+如果你想先不依赖真实模型 key，直接验证这个示例工程的接线是否健康，也可以运行：
+
+```bash
+bash ./scripts/demo-workspace-smoke.sh
+```
+
+它会顺序验证 demo workspace 的配置加载、plugin、MCP 和完整用户故事链路，并把结果写到 `.artifacts/demo-workspace-smoke/`。
 
 ### 一个最小可用配置
 

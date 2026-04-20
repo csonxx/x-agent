@@ -160,6 +160,10 @@
   - 目标：把零散示例升级成“拿下来就能走通”的最小完整工程
   - 已补 `examples/demo-workspace/`
   - 已串起 config、plugin、stdio MCP server、任务说明和可直接运行的 prompts
+- [x] 补 demo workspace 脚本化 smoke
+  - 目标：让示例工程不仅能看，还能被一条命令和 CI 稳定回归
+  - 已补 `scripts/demo-workspace-smoke.sh`
+  - 已补用户故事级 smoke 回归与 CI artifact 上传
 
 ## 推荐推进顺序
 
@@ -173,7 +177,7 @@
 当前默认推进顺序：
 
 1. P2 开发者生态基线已完成
-2. 继续把 demo workspace 往真实用户故事回归、脚本化 smoke 和更多生态模板推进
+2. 继续往更多生态模板、场景化工作区和更高层 multi-agent 示例推进
 
 ## 阶段完成标准
 

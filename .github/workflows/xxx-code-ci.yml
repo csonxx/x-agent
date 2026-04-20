@@ -56,3 +56,15 @@ jobs:
           path: xxx-code/.artifacts/stability-summary.json
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Run demo workspace smoke
+        run: bash ./scripts/demo-workspace-smoke.sh .artifacts/demo-workspace-smoke
+
+      - name: Upload demo workspace smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xxx-code-demo-workspace-smoke
+          path: xxx-code/.artifacts/demo-workspace-smoke
+          if-no-files-found: warn
+          retention-days: 7

@@ -54,6 +54,20 @@ go run ./cmd/xxx-code --config ./examples/demo-workspace/config.yaml
 
 - `examples/demo-workspace/.env.example`
 
+## 快速 smoke
+
+如果你只是想确认这个 demo workspace 的配置、plugin、MCP 和集成链路都还能正常工作，而不是立刻连真实模型，可以在 `xxx-code/` 仓库根目录执行：
+
+```bash
+bash ./scripts/demo-workspace-smoke.sh
+```
+
+它会把 smoke 日志与摘要写到：
+
+```text
+.artifacts/demo-workspace-smoke/
+```
+
 ## 这个 demo 里有什么
 
 ### plugin
