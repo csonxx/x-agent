@@ -1,0 +1,21 @@
+# A self-contained config for the demo workspace.
+provider: anthropic
+model: claude-sonnet-4-5
+
+# All relative paths below resolve from this config file's directory.
+cwd: .
+session_file: .xxx-code/session.json
+mcp_config: .mcp.json
+plugin_dir: .xxx-code/plugins
+hook_event_file: .xxx-code/hooks/events.jsonl
+
+allow_read:
+  - .
+allow_write:
+  - .
+
+stream: true
+verbose: false
+log_level: info
+tool_timeout: 30s
+hook_timeout: 15s

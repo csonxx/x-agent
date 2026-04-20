@@ -156,6 +156,10 @@
   - 目标：为未来更通用的 multi-agent 平台化演进留下稳定边界
   - 已补 `docs/extension-architecture.md`
   - 已明确 tool/plugin/MCP/workflow 的分层约定
+- [x] 补可运行 demo workspace
+  - 目标：把零散示例升级成“拿下来就能走通”的最小完整工程
+  - 已补 `examples/demo-workspace/`
+  - 已串起 config、plugin、stdio MCP server、任务说明和可直接运行的 prompts
 
 ## 推荐推进顺序
 
@@ -169,7 +173,7 @@
 当前默认推进顺序：
 
 1. P2 开发者生态基线已完成
-2. 后续继续沉淀真实案例、示例项目与生态配套
+2. 继续把 demo workspace 往真实用户故事回归、脚本化 smoke 和更多生态模板推进
 
 ## 阶段完成标准
 

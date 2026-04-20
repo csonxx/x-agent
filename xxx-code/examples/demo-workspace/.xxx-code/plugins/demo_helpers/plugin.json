@@ -1,0 +1,41 @@
+{
+  "name": "demo_helpers",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "emit_markdown_note",
+      "description": "Format a short markdown note from structured fields for the current demo workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Markdown heading title."
+          },
+          "summary": {
+            "type": "string",
+            "description": "One short summary paragraph."
+          },
+          "bullets": {
+            "type": "array",
+            "description": "Key points to render as markdown bullets.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title",
+          "summary"
+        ]
+      },
+      "command": "go",
+      "args": [
+        "run",
+        "./emit_markdown_note.go"
+      ],
+      "cwd": ".",
+      "timeout": "5s"
+    }
+  ]
+}

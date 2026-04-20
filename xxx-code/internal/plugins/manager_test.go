@@ -195,6 +195,50 @@ func TestExamplePluginSourcesValidate(t *testing.T) {
 	}
 }
 
+func TestDemoWorkspacePluginLoadsAndRuns(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	workspace := filepath.Join(root, "examples", "demo-workspace")
+
+	registry := engine.NewRegistry()
+	manager, err := Start(context.Background(), registry, Options{WorkingDir: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager == nil {
+		t.Fatal("expected plugin manager to be created for demo workspace")
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	tool, ok := registry.Get("plugin__demo_helpers__emit_markdown_note")
+	if !ok {
+		t.Fatal("expected demo workspace plugin tool to be registered")
+	}
+
+	input, _ := json.Marshal(map[string]any{
+		"title":   "Demo Summary",
+		"summary": "This note came from the demo plugin.",
+		"bullets": []string{"plugin", "mcp", "workflow"},
+	})
+	result, err := tool.Call(context.Background(), &engine.ExecutionContext{WorkingDir: workspace}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected demo plugin result to succeed, got %+v", result)
+	}
+	if !strings.Contains(result.Content, "# Demo Summary") || !strings.Contains(result.Content, "- plugin") {
+		t.Fatalf("unexpected demo plugin output: %q", result.Content)
+	}
+}
+
 func TestInstallAndRemovePlugin(t *testing.T) {
 	dir := t.TempDir()
 	sourceDir := writePluginSource(t, filepath.Join(dir, "candidates"), "echoer", "echo", "#!/bin/sh\ncat\n")

@@ -501,6 +501,34 @@ func TestExampleYAMLConfigsAreLoadable(t *testing.T) {
 	}
 }
 
+func TestDemoWorkspaceConfigIsLoadable(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	configPath := filepath.Join(root, "examples", "demo-workspace", "config.yaml")
+
+	cfg, err := LoadArgs([]string{"--config", configPath}, lookupFromMap(map[string]string{
+		"XXX_CODE_API_KEY": "test-key",
+	}), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConfigFile != configPath {
+		t.Fatalf("expected config path %q, got %q", configPath, cfg.ConfigFile)
+	}
+	if cfg.WorkingDir != filepath.Join(root, "examples", "demo-workspace") {
+		t.Fatalf("unexpected working dir: %q", cfg.WorkingDir)
+	}
+	if cfg.MCPConfigFile != filepath.Join(root, "examples", "demo-workspace", ".mcp.json") {
+		t.Fatalf("unexpected MCP config path: %q", cfg.MCPConfigFile)
+	}
+	if cfg.PluginDir != filepath.Join(root, "examples", "demo-workspace", ".xxx-code", "plugins") {
+		t.Fatalf("unexpected plugin dir: %q", cfg.PluginDir)
+	}
+}
+
 func lookupFromMap(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]

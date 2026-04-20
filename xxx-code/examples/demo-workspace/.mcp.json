@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "demo": {
+      "transport": "stdio",
+      "command": "go",
+      "args": [
+        "run",
+        "./mcp-demo-server"
+      ],
+      "cwd": "."
+    }
+  }
+}

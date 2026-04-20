@@ -376,6 +376,65 @@ func TestExampleMCPConfigsValidate(t *testing.T) {
 	}
 }
 
+func TestDemoWorkspaceMCPServerStartsAndLoadsTools(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	workspace := filepath.Join(root, "examples", "demo-workspace")
+
+	registry := engine.NewRegistry()
+	manager, err := Start(context.Background(), registry, Options{WorkingDir: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager == nil {
+		t.Fatal("expected MCP manager to be created for demo workspace")
+	}
+	defer func() {
+		if err := manager.Close(); err != nil {
+			t.Fatalf("close manager: %v", err)
+		}
+	}()
+
+	if got := manager.ServerCount(); got != 1 {
+		t.Fatalf("expected one demo MCP server, got %d", got)
+	}
+	tool, ok := registry.Get("mcp__demo__echo_text")
+	if !ok {
+		t.Fatal("expected demo MCP tool to be registered")
+	}
+
+	input, _ := json.Marshal(map[string]any{"value": "workspace smoke"})
+	result, err := tool.Call(context.Background(), nil, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected demo MCP tool result to succeed, got %+v", result)
+	}
+	if !strings.Contains(result.Content, "demo: workspace smoke") {
+		t.Fatalf("unexpected demo MCP tool output: %q", result.Content)
+	}
+
+	resource, err := manager.ReadResource(context.Background(), "demo", "memory://demo-guide")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.Contents) != 1 || !strings.Contains(resource.Contents[0].Text, "demo-guide") {
+		t.Fatalf("unexpected demo MCP resource payload: %+v", resource)
+	}
+
+	prompt, err := manager.GetPrompt(context.Background(), "demo", "review_demo", map[string]string{"topic": "the example workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompt.Messages) != 1 || !strings.Contains(prompt.Messages[0].Content, "plugin, MCP, and workflow") {
+		t.Fatalf("unexpected demo MCP prompt payload: %+v", prompt)
+	}
+}
+
 func TestStartMarksUnsupportedTransportAsFailed(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".mcp.json")
