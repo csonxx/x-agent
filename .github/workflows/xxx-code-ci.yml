@@ -37,3 +37,22 @@ jobs:
 
       - name: Check version command
         run: go run ./cmd/xxx-code --version
+
+      - name: Run stability smoke
+        run: |
+          mkdir -p .artifacts
+          go run ./cmd/xxx-code-stability \
+            --iterations 1 \
+            --concurrency 1 \
+            --restart-every 1 \
+            --summary-json .artifacts/stability-summary.json
+          cat .artifacts/stability-summary.json
+
+      - name: Upload stability summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xxx-code-stability-summary
+          path: xxx-code/.artifacts/stability-summary.json
+          if-no-files-found: warn
+          retention-days: 7

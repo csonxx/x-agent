@@ -1,110 +1,178 @@
 # xxx-code Roadmap
 
-更新时间：2026-04-09
+更新时间：2026-04-20
 
 ## 目标
 
-把 `xxx-code` 从“已经很完整的 Go 版 agent runtime”继续收成一个可长期运行、可部署、可观测、可扩展的产品。
+把 `xxx-code` 从“功能已经比较完整的 Go 版 agent runtime”继续收成一个真正适合长期使用的产品底座：
 
-当前已经完成的主干包括：
+- 可持续回归
+- 可稳定发布
+- 可观测、可运维
+- 可被插件、MCP、multi-agent 工作流持续扩展
 
-- 本地 CLI、REPL、TUI、单次执行
-- Anthropic provider 与主循环
-- 本地工具与权限策略
-- multi-agent、workflow、resume
+这意味着后续重点不再是补一个全新的大功能，而是把已经完成的主干能力进一步产品化。
+
+## 当前状态
+
+当前主线已经具备的能力包括：
+
+- 本地 CLI / REPL / TUI / 单次执行
+- provider 抽象与多 provider 支持
+- tool calling 主循环
+- multi-agent 与 workflow 编排
 - MCP `stdio / http / sse / ws`
-- daemon、remote bridge、remote TUI
-- streaming turn
-- bearer auth
+- 插件目录、manifest、动态工具桥接
+- daemon / remote bridge / remote TUI
+- 权限、审计、ACL、速率限制、token file 热轮换
+- 端到端测试、`go test -race ./...`
+- 独立的 `xxx-code-stability` 长稳/soak 程序
 
-接下来不再以“补一个大能力缺口”为主，而是进入稳定性、发布能力、治理能力和生态能力的持续收尾阶段。
+结论上，`xxx-code` 现在已经不是 demo，而是进入“发布能力、运维能力、扩展生态和质量治理”的收尾阶段。
 
-## P0 稳定性
+## 已完成基线
+
+### 稳定性
 
 - [x] 端到端集成测试
-  - 已覆盖 daemon / remote bridge / auth / streaming / workflow / restart 的完整回归链路
+  - 已覆盖 daemon / remote bridge / auth / streaming / workflow / restart 主链路
 - [x] 并发与恢复压测
-  - 已补多 session 并发、daemon restart 后 transcript 恢复、`go test -race ./...`
+  - 已覆盖多 session 并发、daemon restart 后 transcript 恢复、`go test -race ./...`
 - [x] daemon 生命周期收紧
-  - 已补 active turn cancel、关闭时 agent 收敛、订阅关闭、事件背压保护
+  - 已覆盖 active turn cancel、关闭时 agent 收敛、订阅关闭、事件背压保护
 - [x] 错误模型统一
-  - 已补结构化 `error/code/retryable`、remote 端统一解析、timeout/cancel/not found/conflict 判别
+  - 已补结构化 `error/code/retryable`，remote 端统一解析 timeout / cancel / conflict / not found
+- [x] 独立长稳工具
+  - 已补 `cmd/xxx-code-stability`
+  - 已补 restart、plugin、MCP、agent、workflow、session save、timeout 场景
 
-## P1 发布能力
+### 发布能力
 
-- [x] CI 基础
-  - 已补 `gofmt`、`go test ./...`、`go test -race ./...`、`--version` 回归
+- [x] 基础 CI
+  - 已补 `gofmt`、`go test ./...`、`go test -race ./...`、`--version`
 - [x] 版本化与发布
-  - 已补 `xxx-code version` / `--version`
-  - 已补 GoReleaser 配置、release workflow、checksums
-- [x] 配置体系完善
-  - 已补 `.xxx-code/config.json` 自动发现、`--config`、示例模板
+  - 已补 `--version`
+  - 已补 GoReleaser、checksums、release workflow
+- [x] 配置体系
+  - 已补自动发现配置、`--config`、YAML 示例模板
   - 已明确 flags > env > config file > defaults
 - [x] 日志与诊断
   - 已补 `--log-level`、`--debug`、`--log-file`
   - 已补 daemon trace id 与请求日志
 
-## P1 Agent / Workflow 强化
+### Agent / Workflow
 
-- [x] workflow 查询与可视化增强
+- [x] workflow 查询增强
   - 已补 workflow summary 扩展统计、`workflow_tasks`、状态/名称过滤
 - [x] 更细粒度恢复
   - 已补 `workflow_resume.only_failed`
   - 已补 `workflow_resume.task_names`
-  - 会自动把 downstream dependents 一起纳入恢复
-- [x] remote / local 命令面对齐
-  - 已对齐本地/远程 REPL 的 workflow 查询、选择性恢复与 MCP 查询命令
+  - 已支持自动把 downstream dependents 一起纳入恢复
+- [x] remote / local 命面对齐
+  - 已对齐本地/远程 REPL 的 workflow 查询、恢复、MCP 查询命令
 - [x] workflow artifact 约定
   - 已补 `.xxx-code/artifacts/workflows/<workflow-id>/manifest.json`
-  - 已补 task 级 artifact/result 索引，便于排障与上层编排消费
+  - 已补 task 级 artifact/result 索引
 
-## P2 安全与治理
+### 安全与治理
 
 - [x] daemon 审计日志
-  - 已补 request / auth failure / ACL deny / rate limit / tool / policy block / agent 事件记录
+  - 已记录 request / auth failure / ACL deny / rate limit / tool / policy block / agent 事件
 - [x] daemon ACL
-  - 已补 API mode 与 session prefix 级访问控制
-- [x] token 轮换与部署建议
-  - 已补 `daemon_token_file` / `remote_token_file`
-  - 已补热更新 token 轮换、TLS 反代、最小暴露面说明
-- [x] 速率限制与资源上限
+  - 已支持 API mode 与 session prefix 级访问控制
+- [x] token 轮换
+  - 已支持 `daemon_token_file` / `remote_token_file`
+  - 已补热更新轮换与部署建议
+- [x] 速率限制
   - 已补 per-client request rate limit / burst
 
-## P2 生态与扩展
+### 生态与扩展
 
 - [x] MCP 管理增强
-  - 已补 server health、reload、配置校验
-  - 已补本地 REPL、remote REPL、daemon API 的统一入口
+  - 已补 health、reload、配置校验以及本地/远程/daemon 统一入口
 - [x] provider 扩展
-  - 已补 `anthropic / openai / azure-openai`
-  - 已补统一 provider 选择配置与 OpenAI-compatible streaming/tool calling
-- [x] hooks 向事件总线演进
-  - 已补 hooks bus，可同时分发到 shell hook 和 JSONL event sink
-- [x] tool / runtime 插件化
-  - 已补插件目录、manifest、命令型工具桥接、validate/install/remove/reload、本地/远程查看与管理入口
+  - 已支持 `anthropic / openai / gpt / azure-openai / gemini / minimax / glm`
+- [x] hooks 事件总线
+  - 已支持 shell hook 与 JSONL event sink 同时分发
+- [x] runtime 插件化
+  - 已支持插件 validate / install / remove / reload、本地/远程查看与管理
 
-## 执行顺序
+## 现阶段待办
 
-1. 补端到端集成测试与基础 CI
-2. 做并发 / 恢复压测与 daemon 生命周期收敛
-3. 完善版本化、发布和配置体系
-4. 做审计、ACL、速率限制
-5. 扩 MCP 管理与 provider 生态
+下面这些是当前最值得继续推进的事项。优先级越靠前，越偏“产品化闭环”。
 
-## 当前阶段
+## P0 发布前门禁补齐
+
+- [x] 把 `xxx-code-stability` smoke 纳入 CI
+  - 目标：每次改动都自动验证独立长稳程序至少能完整跑一轮
+  - 已补 GitHub Actions 里的 `go run ./cmd/xxx-code-stability --iterations 1`
+  - 已补 summary artifact 上传，便于失败后回看运行结果
+- [ ] 给 release 产物补 artifact smoke
+  - 目标：确认 GoReleaser 打出来的二进制本身可执行
+  - 产出：解压 release 产物后执行 `xxx-code --version`、`xxx-code-stability --version`
+- [ ] 补安装与分发说明
+  - 目标：让用户不看源码也能安装
+  - 产出：README 增加二进制下载、校验、解压、PATH 配置说明
+
+## P1 运维与交付
+
+- [ ] 补 daemon 服务化模板
+  - 目标：让 daemon 更容易正式部署
+  - 产出：`systemd`、`launchd`、Docker 示例
+- [ ] 补 nightly soak / 长稳流水线
+  - 目标：把当前的 soak 能力升级成定时回归，而不是只靠手工触发
+  - 产出：定时 workflow、summary artifact、失败保留现场策略
+- [ ] 补 provider 实网 smoke
+  - 目标：在有密钥时做最小真实 API 回归
+  - 产出：带环境变量门控的 provider smoke matrix
+
+## P1 可观测性
+
+- [ ] 补基础 runtime metrics
+  - 目标：让 daemon 除了日志和 audit 之外，还能暴露稳定的运行指标
+  - 产出：请求数、错误数、turn latency、tool latency、agent/workflow 状态计数
+- [ ] 补性能分析入口
+  - 目标：让长稳和性能问题更容易定位
+  - 产出：`pprof` 或等价 profiling 方案、性能调试文档
+- [ ] 建 benchmark 基线
+  - 目标：关键路径性能退化可量化
+  - 产出：provider loop、workflow orchestration、daemon API 的 benchmark
+
+## P2 开发者生态
+
+- [ ] 补插件开发指南
+  - 目标：让外部开发者清楚如何写 command plugin
+  - 产出：manifest 说明、最佳实践、调试案例
+- [ ] 补 MCP 集成指南
+  - 目标：让使用者更容易接自己的 MCP server
+  - 产出：配置样例、常见 transport、排障手册
+- [ ] 补扩展设计文档
+  - 目标：为未来更通用的 multi-agent 平台化演进留下稳定边界
+  - 产出：tool/plugin/MCP/workflow 的分层约定
+
+## 推荐推进顺序
+
+1. 先补齐 CI / release 门禁，让已有能力真正进入自动质量闭环
+2. 再补 daemon 交付模板和 nightly soak，让系统更适合长期运行
+3. 然后补 metrics / profiling / benchmark，让稳定性和性能都可观测
+4. 最后补插件与 MCP 的开发者文档，把扩展生态收成熟
+
+## 当前默认主线
 
 当前默认推进顺序：
 
-1. 进入 P2 生态与扩展
-2. 当前 roadmap 主线已收口
-3. 再往更通用的扩展体系推进
+1. 完成 P0 里剩余的 release artifact smoke 与安装分发说明
+2. 进入 P1 运维与交付
+3. 再推进 P1 可观测性
+4. 最后整理 P2 开发者生态
 
-## 完成标准
+## 阶段完成标准
 
-阶段性“可发布”标准：
+下一阶段可以视为“更接近正式发布”的标准：
 
-- `go test ./...` 稳定通过
-- 关键路径有端到端集成测试
-- daemon / remote / auth / streaming / workflow 有回归覆盖
-- 有基本 CI
-- 有明确版本、安装和运维说明
+- CI 同时覆盖 `go test`、`-race` 与 `xxx-code-stability` smoke
+- release 产物有最小可执行验证
+- daemon 有正式部署模板
+- soak 能定时跑并保留 summary
+- 关键 runtime 指标可以被观测
+- README 能说明安装、运行、部署、验证的完整闭环
