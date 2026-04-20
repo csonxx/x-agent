@@ -35,6 +35,8 @@ type policyHookStoryProvider struct{}
 
 type timeoutStoryProvider struct{}
 
+type demoWorkspaceStoryProvider struct{}
+
 func (p *toolStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
 	_ = ctx
 
@@ -199,6 +201,90 @@ func (p *timeoutStoryProvider) CreateMessage(ctx context.Context, request engine
 	return engine.CompletionResponse{}, ctx.Err()
 }
 
+func (p *demoWorkspaceStoryProvider) CreateMessage(ctx context.Context, request engine.CompletionRequest) (engine.CompletionResponse, error) {
+	_ = ctx
+
+	if result, ok, failed := storyToolResultFor(request.Messages, "plugin__demo_helpers__emit_markdown_note"); ok {
+		if failed {
+			return engine.CompletionResponse{
+				Message: engine.NewTextMessage(engine.RoleAssistant, "demo-workspace smoke failed at plugin step: "+result),
+			}, nil
+		}
+
+		lines := []string{"demo-workspace smoke complete"}
+		if brief, ok, _ := storyToolResultFor(request.Messages, "read_file"); ok && strings.Contains(brief, `"brief.md"`) {
+			lines = append(lines, "brief loaded")
+		}
+		if guide, ok, _ := storyToolResultFor(request.Messages, "read_mcp_resource"); ok && strings.Contains(guide, "demo-guide") {
+			lines = append(lines, "guide loaded")
+		}
+		if echo, ok, _ := storyToolResultFor(request.Messages, "mcp__demo__echo_text"); ok && strings.Contains(echo, "workspace smoke") {
+			lines = append(lines, "echo loaded")
+		}
+		lines = append(lines, result)
+		return engine.CompletionResponse{
+			Message: engine.NewTextMessage(engine.RoleAssistant, strings.Join(lines, "\n")),
+		}, nil
+	}
+
+	if _, ok, _ := storyToolResultFor(request.Messages, "mcp__demo__echo_text"); ok {
+		input, _ := json.Marshal(map[string]any{
+			"title":   "Demo Summary",
+			"summary": "The demo workspace combines a local brief, MCP data, and a markdown plugin.",
+			"bullets": []string{"brief.md read", "demo-guide loaded", "workspace smoke echoed"},
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "formatting demo note"},
+					{Type: engine.BlockToolUse, ID: "toolu_demo_plugin", Name: "plugin__demo_helpers__emit_markdown_note", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	if _, ok, _ := storyToolResultFor(request.Messages, "read_mcp_resource"); ok {
+		input, _ := json.Marshal(map[string]any{"value": "workspace smoke"})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "echoing through MCP"},
+					{Type: engine.BlockToolUse, ID: "toolu_demo_echo", Name: "mcp__demo__echo_text", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	if _, ok, _ := storyToolResultFor(request.Messages, "read_file"); ok {
+		input, _ := json.Marshal(map[string]any{
+			"server": "demo",
+			"uri":    "memory://demo-guide",
+		})
+		return engine.CompletionResponse{
+			Message: engine.Message{
+				Role: engine.RoleAssistant,
+				Content: []engine.Block{
+					{Type: engine.BlockText, Text: "loading MCP guide"},
+					{Type: engine.BlockToolUse, ID: "toolu_demo_resource", Name: "read_mcp_resource", Input: input},
+				},
+			},
+		}, nil
+	}
+
+	input, _ := json.Marshal(map[string]any{"path": "brief.md"})
+	return engine.CompletionResponse{
+		Message: engine.Message{
+			Role: engine.RoleAssistant,
+			Content: []engine.Block{
+				{Type: engine.BlockText, Text: "reading demo brief"},
+				{Type: engine.BlockToolUse, ID: "toolu_demo_brief", Name: "read_file", Input: input},
+			},
+		},
+	}, nil
+}
+
 func workflowStoryResponse(ctx context.Context, request engine.CompletionRequest, failChild bool) (engine.CompletionResponse, error) {
 	_ = ctx
 
@@ -288,6 +374,81 @@ func TestUserStoryOperatorCanInstallPluginAndUseItInATurn(t *testing.T) {
 	}
 	if updated.MessageCount < 2 {
 		t.Fatalf("expected updated session transcript, got %+v", updated)
+	}
+}
+
+func TestUserStoryDemoWorkspaceCanRunAFullExtensionTurn(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	workspace := filepath.Join(root, "examples", "demo-workspace")
+
+	server, httpServer, cfg := newDaemonHarness(t, &demoWorkspaceStoryProvider{}, func(cfg *config.Config) {
+		cfg.WorkingDir = workspace
+		cfg.ReadRoots = []string{workspace}
+		cfg.WriteRoots = []string{workspace}
+		cfg.PluginDir = filepath.Join(workspace, ".xxx-code", "plugins")
+		cfg.MCPConfigFile = filepath.Join(workspace, ".mcp.json")
+		cfg.MaxTurns = 8
+	})
+	defer func() {
+		httpServer.Close()
+		_ = server.Close()
+	}()
+
+	client := remote.NewClient(httpServer.URL, cfg.DaemonToken, httpServer.Client())
+	session, err := client.EnsureSession(context.Background(), "story-demo-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plugins, err := client.GetPlugins(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plugins.PluginCount != 1 || plugins.ToolCount != 1 {
+		t.Fatalf("expected demo workspace plugin to load, got %+v", plugins)
+	}
+
+	mcpSummary, err := client.GetMCP(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mcpSummary.ServerCount != 1 || mcpSummary.ToolCount != 1 {
+		t.Fatalf("expected demo workspace MCP server to load, got %+v", mcpSummary)
+	}
+
+	result, updated, err := client.RunTurn(context.Background(), session.ID, "run the demo workspace smoke", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalText, "demo-workspace smoke complete") {
+		t.Fatalf("expected smoke summary in final text, got %s", result.FinalText)
+	}
+	if !strings.Contains(result.FinalText, "# Demo Summary") || !strings.Contains(result.FinalText, "- workspace smoke echoed") {
+		t.Fatalf("expected plugin markdown output in final text, got %s", result.FinalText)
+	}
+	if updated.MessageCount < 2 {
+		t.Fatalf("expected updated transcript after smoke turn, got %+v", updated)
+	}
+
+	messages, err := client.ListMessages(context.Background(), session.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiredTools := []string{
+		"read_file",
+		"read_mcp_resource",
+		"mcp__demo__echo_text",
+		"plugin__demo_helpers__emit_markdown_note",
+	}
+	usedTools := storyToolUseNames(messages)
+	for _, name := range requiredTools {
+		if !containsString(usedTools, name) {
+			t.Fatalf("expected transcript to include tool %s, got %+v", name, usedTools)
+		}
 	}
 }
 
@@ -1294,6 +1455,44 @@ func TestIntegrationMCPHelperProcess(t *testing.T) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+func storyToolResultFor(messages []engine.Message, toolName string) (string, bool, bool) {
+	toolIDs := make(map[string]string)
+	for _, message := range messages {
+		for _, block := range message.Content {
+			switch block.Type {
+			case engine.BlockToolUse:
+				toolIDs[block.ID] = block.Name
+			case engine.BlockToolResult:
+				if toolIDs[block.ToolUseID] == toolName {
+					return block.Result, true, block.IsError
+				}
+			}
+		}
+	}
+	return "", false, false
+}
+
+func storyToolUseNames(messages []engine.Message) []string {
+	var names []string
+	for _, message := range messages {
+		for _, block := range message.Content {
+			if block.Type == engine.BlockToolUse {
+				names = append(names, block.Name)
+			}
+		}
+	}
+	return names
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRemoteAuditEvent(events []remote.AuditEvent, action, code string) bool {
